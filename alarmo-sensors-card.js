@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.1-rc.3';
+const CARD_VERSION = '0.3.1-rc.4';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -966,6 +966,11 @@ if (!customElements.get('alarmo-sensors-card')) {
 /* ------------------------------------------------------------------ */
 
 class AlarmoSensorsCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+  }
+
   setConfig(config) {
     this._config = { ...config };
     if (!this.shadowRoot.childNodes.length) this._render();
@@ -981,7 +986,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
   }
 
   _render() {
-    this.attachShadow({ mode: 'open' });
+    // el shadow root ya existe (creado en el constructor)
     this.shadowRoot.innerHTML = `
       <style>
         .f { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
@@ -1012,6 +1017,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
           <label><input data-k="group_by_device" type="checkbox"> Agrupar por dispositivo (contact + tamper)</label>
           <label><input data-k="show_disabled" type="checkbox"> Mostrar sensores desactivados</label>
           <label><input data-k="compact" type="checkbox"> Compacto</label>
+          <label><input data-k="debug" type="checkbox"> Debug (consola)</label>
         </div>
       </div>
     `;
