@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>alarmo-sensors-card · banco de pruebas</title>
+  <style>
+    :root {
+      --primary-text-color: #e6e6e6;
+      --secondary-text-color: #9e9e9e;
+      --primary-color: #03a9f4;
+      --error-color: #e53935;
+      --success-color: #43a047;
+      --warning-color: #ff9800;
+      --accent-color: #ff9800;
+      --card-background-color: #1e1e1f;
+      --secondary-background-color: #2b2b2e;
+      --divider-color: #3a3a3d;
+      --mdi-filter: invert(1);
+    }
+    body {
+      margin: 0; padding: 24px;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #111; color: var(--primary-text-color);
+    }
+    .layout { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+    .cards { flex: 1 1 460px; max-width: 560px; }
+    .panel {
+      flex: 0 0 260px; background: #1a1a1b; border: 1px solid #333;
+      border-radius: 10px; padding: 14px 16px; font-size: 14px;
+    }
+    .panel h3 { margin: 4px 0 10px; font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }
+    .panel button {
+      display: block; width: 100%; margin: 5px 0; padding: 8px 10px;
+      background: #262628; color: var(--primary-text-color);
+      border: 1px solid #3a3a3d; border-radius: 8px; cursor: pointer; text-align: left;
+    }
+    .panel button:hover { background: #303034; }
+    .cardwrap { margin-bottom: 28px; }
+    .cardwrap h2 { font-size: 1em; color: #999; font-weight: 500; margin: 0 0 8px; }
+    h1 { font-size: 1.1em; color: #aaa; font-weight: 500; margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>Banco de pruebas · <b>alarmo-sensors-card</b> (sin Home Assistant)</h1>
+  <div class="layout">
+    <div class="cards">
+      <div class="cardwrap">
+        <h2>1 · Agrupado por área, con filtros por modo</h2>
+        <alarmo-sensors-card id="card1"></alarmo-sensors-card>
+      </div>
+      <div class="cardwrap">
+        <h2>2 · Compacto + orden "abiertos primero"</h2>
+        <alarmo-sensors-card id="card2"></alarmo-sensors-card>
+      </div>
+      <div class="cardwrap">
+        <h2>3 · Modo fallback manual (API de Alarmo simulada como caída)</h2>
+        <alarmo-sensors-card id="card3"></alarmo-sensors-card>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Simular sensores</h3>
+      <button onclick="toggleSensor('binary_sensor.puerta_principal')">🚪 Puerta principal (abrir/cerrar)</button>
+      <button onclick="toggleSensor('binary_sensor.ventana_salon')">🪟 Ventana salón</button>
+      <button onclick="toggleSensor('lock.cerradura_entrada')">🔒 Cerradura (locked/unlocked)</button>
+      <button onclick="toggleSensor('binary_sensor.movimiento_pasillo')">🏃 Movimiento pasillo</button>
+      <button onclick="setState('binary_sensor.sensor_movimiento_garaje','unavailable')">⚠️ Sensor garaje → unavailable</button>
+      <h3>Simular alarma</h3>
+      <button onclick="armArea('alarm_control_panel.planta_baja','armed_away')">🌙→🏠 Armar planta baja: away</button>
+      <button onclick="armArea('alarm_control_panel.planta_baja','armed_night')">🌙 Armar planta baja: night</button>
+      <button onclick="armArea('alarm_control_panel.planta_baja')">⭕ Desarmar planta baja</button>
+      <button onclick="setState('alarm_control_panel.garaje','triggered',{arm_mode:'armed_away'})">🚨 Disparar alarma garaje</button>
+      <h3>Simular cambios de config</h3>
+      <button onclick="toggleGarageDoorEnabled()">🔁 Activar/desactivar sensor puerta garaje</button>
+    </div>
+  </div>
+
+  <script src="mock-hass.js"></script>
+  <script src="../alarmo-sensors-card.js"></script>
+  <script>
+    // Card 1: defaults
+    document.getElementById('card1').setConfig({
+      type: 'custom:alarmo-sensors-card',
+      title: 'Alarmo · Estado de sensores',
+    });
+
+    // Card 2: compact + open first
+    document.getElementById('card2').setConfig({
+      type: 'custom:alarmo-sensors-card',
+      title: 'Compacto',
+      compact: true,
+      sort: 'open_first',
+      modes: ['armed_night'],
+    });
+
+    // Card 3: manual fallback (no WS API available)
+    document.getElementById('card3').setConfig({
+      type: 'custom:alarmo-sensors-card',
+      title: 'Fallback manual',
+      entities: [
+        { entity: 'binary_sensor.puerta_principal', name: 'Puerta principal', type: 'door', area: 'Entrada' },
+        { entity: 'lock.cerradura_entrada', name: 'Cerradura', type: 'door', area: 'Entrada' },
+        { entity: 'binary_sensor.sensor_humo_cocina', name: 'Humo cocina', type: 'environmental', area: 'Cocina' },
+      ],
+    });
+
+    // Card 3 simulates a dead Alarmo API: override its WS calls to fail.
+    window.mockHass = new MockHass();
+    const deadHass = Object.assign(Object.create(Object.getPrototypeOf(window.mockHass)), window.mockHass, {
+      callWS: async () => { throw new Error('api unavailable'); },
+    });
+
+    function renderCards() {
+      document.getElementById('card1').hass = window.mockHass;
+      document.getElementById('card2').hass = window.mockHass;
+      document.getElementById('card3').hass = deadHass;
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      window.mockHass = new MockHass();
+      renderCards();
+    });
+    window.addEventListener('DOMContentLoaded', () => {
+      window.renderCards();
+      // Auto-test mode: ?step=N runs a scripted interaction sequence so the
+      // page can be verified headlessly, one screenshot per step.
+      const step = parseInt(new URLSearchParams(location.search).get('step') || '0', 10);
+      if (step > 0) setTimeout(() => window.runStep(step), 600);
+    });
+
+    window.runStep = function (step) {
+      const card1 = document.getElementById('card1');
+      if (step >= 1) toggleSensor('binary_sensor.puerta_principal');          // 1: open the front door
+      if (step >= 2) {                                                        // 2: filter by "Noche"
+        const chip = card1.shadowRoot.querySelector('button[data-mode="armed_night"]');
+        if (chip) chip.click();
+      }
+      if (step >= 3) {                                                        // 3: arm night + open window
+        armArea('alarm_control_panel.planta_baja', 'armed_night');
+        toggleSensor('binary_sensor.ventana_salon');
+      }
+      if (step >= 4) toggleGarageDoorEnabled();                               // 4: config change -> sensor shows up
+      window.renderCards();
+    };
+  </script>
+</body>
+</html>

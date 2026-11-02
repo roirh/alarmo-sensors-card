@@ -1,0 +1,816 @@
+/**
+ * alarmo-sensors-card
+ * Custom Lovelace card to visualize the state of the sensors configured in Alarmo.
+ *
+ * - Read-only: consumes the existing Alarmo WebSocket API (alarmo/sensors, alarmo/areas,
+ *   alarmo/entities) without requiring any modification to the integration.
+ * - Live sensor state comes from hass.states (already subscribed by Lovelace).
+ * - Groups sensors by area and filters by arm mode (away, home, night, vacation, custom).
+ * - Defensive design: if the Alarmo WS API changes or is unavailable, the card falls back
+ *   to a manual entity list (`entities:` / `include:` in the YAML config) instead of breaking.
+ *
+ * Install: copy this file to /config/www/ and register it as a JS module resource
+ *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
+ */
+
+const CARD_VERSION = '0.1.0';
+
+/* ------------------------------------------------------------------ */
+/* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
+/* ------------------------------------------------------------------ */
+
+// States that alarmo's sensors.py considers "open" (SENSOR_STATES_OPEN) and "closed".
+const OPEN_STATES = ['on', 'open', 'unlocked'];
+const CLOSED_STATES = ['off', 'closed', 'locked'];
+
+const SENSOR_TYPES = {
+  door: { en: 'Door', es: 'Puerta' },
+  window: { en: 'Window', es: 'Ventana' },
+  motion: { en: 'Motion', es: 'Movimiento' },
+  tamper: { en: 'Tamper', es: 'Manipulación' },
+  environmental: { en: 'Environmental', es: 'Ambiental' },
+  other: { en: 'Other', es: 'Otro' },
+};
+
+const SENSOR_ICONS = {
+  door: { closed: 'mdi:door-closed', open: 'mdi:door-open' },
+  window: { closed: 'mdi:window-closed', open: 'mdi:window-open' },
+  motion: { closed: 'mdi:motion-sensor-off', open: 'mdi:motion-sensor' },
+  tamper: { closed: 'mdi:crop-portrait', open: 'mdi:vibrate' },
+  environmental: { closed: 'mdi:fire', open: 'mdi:fire-alert' },
+  other: { closed: 'mdi:check-circle', open: 'mdi:alert-circle' },
+};
+
+const MODES = {
+  armed_away: { label: { en: 'Away', es: 'Fuera' }, icon: 'mdi:exit-run' },
+  armed_home: { label: { en: 'Home', es: 'Casa' }, icon: 'mdi:home' },
+  armed_night: { label: { en: 'Night', es: 'Noche' }, icon: 'mdi:weather-night' },
+  armed_vacation: { label: { en: 'Vacation', es: 'Vacaciones' }, icon: 'mdi:palm-tree' },
+  armed_custom_bypass: { label: { en: 'Custom', es: 'Personalizado' }, icon: 'mdi:wrench' },
+};
+
+const DISARMED_ICON = 'mdi:shield-off';
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+const i18n = (lang, table) => (table && (table[lang] || table.en)) || '';
+
+function isOpen(state) {
+  return OPEN_STATES.includes(state);
+}
+function isClosed(state) {
+  return CLOSED_STATES.includes(state);
+}
+
+function computeDomain(entityId) {
+  return entityId.substr(0, entityId.indexOf('.'));
+}
+
+function friendlyName(stateObj) {
+  return (stateObj && stateObj.attributes && stateObj.attributes.friendly_name) || '';
+}
+
+function normalizeSensorType(rawType, stateObj) {
+  if (rawType && SENSOR_TYPES[rawType]) return rawType;
+  // Fall back to the HA device_class, the same mapping alarmo's frontend uses
+  // when suggesting a type for a new sensor (sensors.ts / sensorClassToType).
+  const dc = stateObj && stateObj.attributes && stateObj.attributes.device_class;
+  switch (dc) {
+    case 'door':
+    case 'garage_door':
+    case 'lock':
+    case 'opening':
+      return 'door';
+    case 'window':
+      return 'window';
+    case 'motion':
+    case 'moving':
+    case 'occupancy':
+    case 'presence':
+    case 'vibration':
+    case 'sound':
+      return 'motion';
+    case 'tamper':
+      return 'tamper';
+    case 'carbon_monoxide':
+    case 'gas':
+    case 'heat':
+    case 'moisture':
+    case 'smoke':
+    case 'safety':
+      return 'environmental';
+    default:
+      return computeDomain(stateObj ? stateObj.entity_id : '') === 'lock' ? 'door' : 'other';
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* The card                                                            */
+/* ------------------------------------------------------------------ */
+
+class AlarmoSensorsCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._hass = null;
+    this._config = {};
+    this._alarmo = null;          // normalized data model
+    this._loading = false;
+    this._loadFailed = false;
+    _scheduleRetry.clear(this);
+    this._unsubConfig = null;
+    this._collapsedAreas = new Set();
+    this._activeModeFilters = null; // null = show all
+    this._expandedSensor = null;
+  }
+
+  /* ---------- Lovelace integration ---------- */
+
+  setConfig(config) {
+    if (!config || typeof config !== 'object') {
+      throw new Error('Invalid configuration');
+    }
+    this._config = {
+      title: config.title || '',
+      group_by: config.group_by || 'area',            // 'area' | 'none'
+      areas: Array.isArray(config.areas) ? config.areas : null,
+      modes: Array.isArray(config.modes) ? config.modes : null,
+      show_disabled: !!config.show_disabled,
+      compact: !!config.compact,
+      sort: config.sort || 'name',                    // 'name' | 'open_first'
+      entities: Array.isArray(config.entities) ? config.entities : null,
+      include: typeof config.include === 'string' ? config.include : null,
+      show_more_info: config.show_more_info !== false,
+    };
+    this._alarmo = null;
+    this._activeModeFilters = null;
+    if (this._hass) this._loadAlarmoData(this._hass);
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._alarmo && !this._loading) {
+      this._loadAlarmoData(hass);
+    }
+    this._render();
+  }
+
+  static getStubConfig() {
+    return { type: 'custom:alarmo-sensors-card', title: 'Alarmo · Sensores' };
+  }
+
+  getCardSize() {
+    return 4;
+  }
+
+  static getConfigElement() {
+    return document.createElement('alarmo-sensors-card-editor');
+  }
+
+  disconnectedCallback() {
+    _scheduleRetry.clear(this);
+    if (this._unsubConfig) {
+      try { this._unsubConfig.then((fn) => fn()); } catch (e) { /* noop */ }
+      this._unsubConfig = null;
+    }
+  }
+
+  /* ---------- Data loading (defensive) ---------- */
+
+  async _loadAlarmoData(hass) {
+    if (this._loading) return;
+    this._loading = true;
+    let wsOk = false;
+
+    try {
+      const safe = (p) => p.catch(() => null);
+      const [sensors, areas, entities] = await Promise.all([
+        safe(hass.callWS({ type: 'alarmo/sensors' })),
+        safe(hass.callWS({ type: 'alarmo/areas' })),
+        safe(hass.callWS({ type: 'alarmo/entities' })),
+      ]);
+
+      if (sensors && areas) {
+        wsOk = true;
+        this._alarmo = this._buildModelFromWs(sensors || {}, areas || {}, entities || []);
+        this._loadFailed = false;
+        this._subscribeConfigUpdates(hass);
+      }
+    } catch (e) {
+      // ignore, fall through to fallback
+    }
+
+    if (!wsOk) {
+      // Fallback: build model from manual config and/or hass.states so the
+      // card still works if the WS API shape ever changes.
+      this._alarmo = this._buildModelFallback();
+      this._loadFailed = true;
+      _scheduleRetry.set(this, setTimeout(() => {
+        this._loading = false;
+        if (this._hass && this._alarmo && this._alarmo.source !== 'ws') {
+          this._loadAlarmoData(this._hass);
+        }
+      }, 60000));
+    }
+
+    this._loading = false;
+    this._render();
+  }
+
+  async _subscribeConfigUpdates(hass) {
+    if (this._unsubConfig) return;
+    try {
+      const conn = hass.connection || hass.conn;
+      if (conn && typeof conn.subscribeMessage === 'function') {
+        this._unsubConfig = await conn.subscribeMessage(() => {
+          // Alarmo config changed -> reload sensor/area definitions.
+          this._alarmo = null;
+          this._loading = false;
+          if (this._hass) this._loadAlarmoData(this._hass);
+        }, { type: 'alarmo_config_updated' });
+      }
+    } catch (e) {
+      this._unsubConfig = null; // subscription is optional
+    }
+  }
+
+  _buildModelFromWs(sensors, areas, alarmEntities) {
+    const areaList = Object.values(areas).map((a) => ({
+      area_id: String(a.area_id),
+      name: a.name || String(a.area_id),
+      modes: Object.keys((a.modes || {})).filter((m) => a.modes[m] && a.modes[m].enabled),
+    }));
+
+    const entityByArea = {};
+    (Array.isArray(alarmEntities) ? alarmEntities : []).forEach((e) => {
+      entityByArea[String(e.area_id)] = e.entity_id;
+    });
+
+    const sensorList = Object.values(sensors)
+      .filter((s) => s && s.entity_id)
+      .map((s) => ({
+        entity_id: s.entity_id,
+        name: friendlyName(this._hass && this._hass.states[s.entity_id]) || s.entity_id,
+        type: normalizeSensorType(s.type, this._hass && this._hass.states[s.entity_id]),
+        area: s.area != null ? String(s.area) : null,
+        modes: Array.isArray(s.modes) ? s.modes : [],
+        enabled: s.enabled !== false,
+        always_on: !!s.always_on,
+        auto_bypass: !!s.auto_bypass,
+        group: s.group || null,
+      }));
+
+    return {
+      source: 'ws',
+      areas: areaList,
+      sensors: sensorList,
+      entityByArea,
+    };
+  }
+
+  _buildModelFallback() {
+    const lang = this._language();
+    let entries = [];
+
+    if (this._config.entities) {
+      entries = this._config.entities.map((e) => ({
+        entity_id: e.entity,
+        name: e.name || e.entity,
+        type: e.type || 'other',
+        area: e.area || null,
+        modes: Array.isArray(e.modes) ? e.modes : [],
+        enabled: e.enabled !== false,
+        always_on: !!e.always_on,
+        auto_bypass: false,
+        group: null,
+      }));
+    } else if (this._config.include) {
+      let re;
+      try { re = new RegExp(this._config.include); } catch (e) { re = null; }
+      if (re) {
+        entries = Object.values(this._hass ? this._hass.states : {})
+          .filter((s) => re.test(s.entity_id) || re.test(friendlyName(s)))
+          .map((s) => ({
+            entity_id: s.entity_id,
+            name: friendlyName(s) || s.entity_id,
+            type: normalizeSensorType(null, s),
+            area: (s.attributes && (s.attributes.area || s.attributes.room)) || null,
+            modes: [],
+            enabled: true,
+            always_on: false,
+            auto_bypass: false,
+            group: null,
+          }));
+      }
+    }
+
+    const areasByName = new Map();
+    entries.forEach((s) => {
+      const key = s.area || i18n(lang, { en: 'Sensors', es: 'Sensores' });
+      if (!areasByName.has(key)) {
+        areasByName.set(key, { area_id: key, name: key, modes: [] });
+      }
+    });
+
+    return {
+      source: 'manual',
+      areas: [...areasByName.values()],
+      sensors: entries,
+      entityByArea: {},
+    };
+  }
+
+  /* ---------- Derived view model ---------- */
+
+  _language() {
+    const l = this._hass && (this._hass.language || this._hass.locale);
+    return l && String(l).toLowerCase().startsWith('es') ? 'es' : 'en';
+  }
+
+  _allModes() {
+    if (!this._alarmo) return [];
+    // Explicit config restricts the offered filter chips; otherwise derive
+    // from the alarmo data itself (sensors' modes + enabled area modes).
+    if (this._config.modes) return this._config.modes.filter((m) => MODES[m]);
+    const set = new Set();
+    this._alarmo.sensors.forEach((s) => (s.modes || []).forEach((m) => set.add(m)));
+    this._alarmo.areas.forEach((a) => (a.modes || []).forEach((m) => set.add(m)));
+    return [...set].filter((m) => MODES[m]);
+  }
+
+  _visibleSensors(areaId) {
+    const lang = this._language();
+    const filters = this._activeModeFilters;
+    let list = this._alarmo.sensors.filter((s) => {
+      const areaKey = s.area != null ? String(s.area) : (this._alarmo.areas[0] ? this._alarmo.areas[0].area_id : null);
+      if (areaKey !== areaId) return false;
+      if (!this._config.show_disabled && !s.enabled) return false;
+      if (filters && filters.size) {
+        // A sensor matches when it is active in at least one of the selected
+        // modes (or is always_on, which applies to every mode).
+        const match = s.always_on || (s.modes || []).some((m) => filters.has(m));
+        if (!match) return false;
+      }
+      return true;
+    });
+
+    if (this._config.sort === 'open_first') {
+      list = list.slice().sort((a, b) => {
+        const ao = this._sensorState(a.entity_id) === 'open' ? 0 : 1;
+        const bo = this._sensorState(b.entity_id) === 'open' ? 0 : 1;
+        return ao - bo || a.name.localeCompare(b.name);
+      });
+    } else {
+      list = list.slice().sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return list;
+  }
+
+  _visibleAreas() {
+    if (!this._alarmo) return [];
+    let areas = this._alarmo.areas;
+    if (this._config.areas) {
+      const wanted = this._config.areas.map(String);
+      areas = areas.filter((a) => wanted.includes(a.area_id) || wanted.includes(a.name));
+    }
+    return areas;
+  }
+
+  _sensorState(entityId) {
+    const stateObj = this._hass && this._hass.states[entityId];
+    if (!stateObj) return 'missing';
+    const st = String(stateObj.state).toLowerCase();
+    if (st === 'unavailable' || st === 'unknown' || st === 'none') return 'unavailable';
+    if (isOpen(st)) return 'open';
+    if (isClosed(st)) return 'closed';
+    return 'other';
+  }
+
+  _bypassedSet() {
+    // Alarm entity attributes expose bypassed_sensors / open_sensors (read-only info).
+    const result = new Set();
+    if (!this._hass || !this._alarmo) return result;
+    Object.values(this._alarmo.entityByArea).forEach((eid) => {
+      const s = this._hass.states[eid];
+      const attr = s && s.attributes;
+      if (!attr) return;
+      (attr.bypassed_sensors || []).forEach((x) => result.add(x));
+    });
+    return result;
+  }
+
+  /* ---------- Rendering ---------- */
+
+  _render() {
+    const lang = this._language();
+    const t = {
+      sensors: { en: 'sensors', es: 'sensores' },
+      open: { en: 'Open', es: 'Abierto' },
+      closed: { en: 'Closed', es: 'Cerrado' },
+      unavailable: { en: 'Unavailable', es: 'No disponible' },
+      missing: { en: 'Not found', es: 'No encontrado' },
+      disabled: { en: 'Disabled', es: 'Desactivado' },
+      alwaysOn: { en: '24/7', es: '24/7' },
+      bypass: { en: 'Bypassed', es: 'Bypass' },
+      allModes: { en: 'All', es: 'Todos' },
+      noData: { en: 'Waiting for Alarmo data…', es: 'Esperando datos de Alarmo…' },
+      wsWarn: {
+        en: 'Alarmo API not reachable – showing manual/fallback list.',
+        es: 'API de Alarmo no disponible – mostrando lista manual/alternativa.',
+      },
+      armState: {
+        disarmed: { en: 'Disarmed', es: 'Desarmada' },
+        armed: { en: 'Armed', es: 'Armada' },
+        triggered: { en: 'TRIGGERED', es: 'DISPARADA' },
+        pending: { en: 'Arming…', es: 'Armando…' },
+      },
+    };
+
+    if (!this._alarmo) {
+      this.shadowRoot.innerHTML = `
+        <ha-card>
+          <div class="empty">${i18n(lang, t.noData)}</div>
+        </ha-card>
+        ${this._styles()}
+      `;
+      return;
+    }
+
+    const areas = this._visibleAreas();
+    const groupByArea = this._config.group_by !== 'none';
+    const bypassed = this._bypassedSet();
+    const allModes = this._allModes();
+    const filters = this._activeModeFilters;
+
+    // Filter chips
+    const chips = allModes.map((m) => {
+      const active = filters && filters.has(m);
+      return `
+        <button class="chip ${active ? 'chip-active' : ''}" data-mode="${m}" title="${i18n(lang, MODES[m].label)}">
+          <ha-icon icon="${MODES[m].icon}"></ha-icon>
+          <span>${i18n(lang, MODES[m].label)}</span>
+        </button>
+      `;
+    }).join('');
+
+    const chipAll = `
+      <button class="chip ${!filters || !filters.size ? 'chip-active' : ''}" data-mode="__all__">
+        <ha-icon icon="mdi:filter-variant-remove"></ha-icon>
+        <span>${i18n(lang, t.allModes)}</span>
+      </button>
+    `;
+
+    // Area sections
+    const sections = areas.map((area) => {
+      const sensors = this._visibleSensors(area.area_id);
+      if (this._config.group_by !== 'none' && !this._config.show_disabled && !sensors.length && this._alarmo.sensors.length) {
+        // skip empty areas unless it's the only pseudo-area
+        if (areas.length > 1) return '';
+      }
+      const alarmEid = this._alarmo.entityByArea[area.area_id];
+      const alarmState = alarmEid && this._hass && this._hass.states[alarmEid];
+      const armMode = alarmState && alarmState.attributes && alarmState.attributes.arm_mode;
+      const alarmRaw = alarmState ? String(alarmState.state).toLowerCase() : null;
+      let armChip = '';
+      if (alarmRaw) {
+        const cls = alarmRaw.includes('triggered') ? 'arm-triggered'
+          : alarmRaw === 'disarmed' ? 'arm-disarmed'
+          : alarmRaw === 'pending' || alarmRaw === 'arming' ? 'arm-pending' : 'arm-armed';
+        const label = alarmRaw.includes('triggered') ? i18n(lang, t.armState.triggered)
+          : alarmRaw === 'disarmed' ? i18n(lang, t.armState.disarmed)
+          : `${i18n(lang, t.armState.armed)}${armMode && MODES[armMode] ? ' · ' + i18n(lang, MODES[armMode].label) : ''}`;
+        armChip = `<span class="armchip ${cls}"><ha-icon icon="${armMode && MODES[armMode] ? MODES[armMode].icon : DISARMED_ICON}"></ha-icon>${label}</span>`;
+      }
+
+      const collapsed = this._collapsedAreas.has(area.area_id);
+      const rows = sensors.map((s) => this._sensorRow(s, bypassed, lang, t)).join('');
+      const summary = this._summaryBadge(sensors, lang, t);
+
+      return `
+        <section class="area ${collapsed ? 'collapsed' : ''}">
+          <header data-area="${area.area_id}">
+            <ha-icon class="caret" icon="${collapsed ? 'mdi:chevron-right' : 'mdi:chevron-down'}"></ha-icon>
+            <span class="area-name">${area.name}</span>
+            ${armChip}
+            <span class="count">${summary}</span>
+          </header>
+          ${collapsed ? '' : `<div class="rows">${rows || `<div class="empty small">${i18n(lang, { en: 'No sensors match the filter', es: 'Ningún sensor coincide con el filtro' })}</div>`}</div>`}
+        </section>
+      `;
+    }).join('');
+
+    const title = this._config.title
+      ? `<div class="title">${this._config.title}</div>`
+      : '';
+
+    const warn = this._loadFailed
+      ? `<div class="warn"><ha-icon icon="mdi:alert-outline"></ha-icon>${i18n(lang, t.wsWarn)}</div>`
+      : '';
+
+    this.shadowRoot.innerHTML = `
+      <ha-card>
+        ${title}
+        ${allModes.length ? `<div class="chips">${chipAll}${chips}</div>` : ''}
+        ${warn}
+        ${groupByArea ? sections : this._flatList(lang, t, bypassed)}
+      </ha-card>
+      ${this._styles()}
+    `;
+
+    this._bindEvents();
+  }
+
+  _flatList(lang, t, bypassed) {
+    const rows = this._alarmo.sensors
+      .filter((s) => this._config.show_disabled || s.enabled)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((s) => this._sensorRow(s, bypassed, lang, t))
+      .join('');
+    return `<div class="rows">${rows}</div>`;
+  }
+
+  _summaryBadge(sensors, lang, t) {
+    const open = sensors.filter((s) => this._sensorState(s.entity_id) === 'open').length;
+    return open
+      ? `<span class="open-badge">${open} ${i18n(lang, t.open).toLowerCase()}</span>`
+      : `<span class="ok-badge">✓</span>`;
+  }
+
+  _sensorRow(sensor, bypassed, lang, t) {
+    const st = this._sensorState(sensor.entity_id);
+    const open = st === 'open';
+    const icon = SENSOR_ICONS[sensor.type] || SENSOR_ICONS.other;
+    const typeLabel = i18n(lang, SENSOR_TYPES[sensor.type] || SENSOR_TYPES.other);
+
+    const badges = [];
+    if (!sensor.enabled) badges.push(`<span class="badge badge-off">${i18n(lang, t.disabled)}</span>`);
+    if (sensor.always_on) badges.push(`<span class="badge badge-aon">${i18n(lang, t.alwaysOn)}</span>`);
+    if (bypassed.has(sensor.entity_id)) badges.push(`<span class="badge badge-bypass">${i18n(lang, t.bypass)}</span>`);
+    if (sensor.auto_bypass) badges.push(`<span class="badge badge-bypass" title="auto_bypass">auto</span>`);
+
+    const modeIcons = (sensor.modes || []).filter((m) => MODES[m]).map((m) => `
+      <ha-icon class="mode-ic" icon="${MODES[m].icon}" title="${i18n(lang, MODES[m].label)}"></ha-icon>
+    `).join('');
+
+    const stateCls = st === 'open' ? 'st-open' : st === 'closed' ? 'st-closed' : st === 'unavailable' ? 'st-unavail' : 'st-missing';
+    const stateLabel = st === 'open' ? i18n(lang, t.open)
+      : st === 'closed' ? i18n(lang, t.closed)
+      : st === 'unavailable' ? i18n(lang, t.unavailable)
+      : i18n(lang, t.missing);
+
+    return `
+      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''}" data-entity="${sensor.entity_id}">
+        <ha-icon class="s-ic ${stateCls}" icon="${open ? icon.open : icon.closed}"></ha-icon>
+        <div class="s-main">
+          <div class="s-name">${sensor.name}</div>
+          <div class="s-sub">
+            <span class="s-type">${typeLabel}</span>
+            ${modeIcons}
+            ${badges.join('')}
+          </div>
+        </div>
+        <span class="s-state ${stateCls}">${stateLabel}</span>
+      </div>
+    `;
+  }
+
+  _bindEvents() {
+    const root = this.shadowRoot;
+
+    root.querySelectorAll('.chip').forEach((el) => {
+      el.addEventListener('click', () => {
+        const mode = el.getAttribute('data-mode');
+        if (mode === '__all__') {
+          this._activeModeFilters = null;
+        } else {
+          const set = new Set(this._activeModeFilters || []);
+          if (set.has(mode)) set.delete(mode); else set.add(mode);
+          this._activeModeFilters = set.size ? set : null;
+        }
+        this._render();
+      });
+    });
+
+    root.querySelectorAll('section.area > header').forEach((el) => {
+      el.addEventListener('click', () => {
+        const id = el.getAttribute('data-area');
+        if (this._collapsedAreas.has(id)) this._collapsedAreas.delete(id);
+        else this._collapsedAreas.add(id);
+        this._render();
+      });
+    });
+
+    if (this._config.show_more_info) {
+      root.querySelectorAll('.row').forEach((el) => {
+        el.addEventListener('click', () => {
+          const ev = new Event('hass-more-info', { bubbles: true, composed: true });
+          ev.entity = el.getAttribute('data-entity');
+          this.dispatchEvent(ev);
+        });
+      });
+    }
+  }
+
+  _styles() {
+    return `
+      <style>
+        :host {
+          display: block;
+          --asc-open: var(--error-color, #e53935);
+          --asc-closed: var(--success-color, #43a047);
+          --asc-idle: var(--secondary-text-color, #9e9e9e);
+        }
+        ha-card { padding: 12px 14px; }
+        .title {
+          font-size: 1.15em; font-weight: 600;
+          padding: 2px 0 8px;
+          color: var(--primary-text-color);
+        }
+        .empty { padding: 18px; color: var(--secondary-text-color); text-align: center; }
+        .empty.small { padding: 10px; font-size: 0.9em; }
+
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 10px; }
+        .chip {
+          display: inline-flex; align-items: center; gap: 4px;
+          border: 1px solid var(--divider-color, #444);
+          background: transparent; color: var(--primary-text-color);
+          border-radius: 16px; padding: 4px 10px; font-size: 0.85em;
+          cursor: pointer; opacity: 0.75;
+        }
+        .chip ha-icon { --mdc-icon-size: 16px; }
+        .chip-active {
+          opacity: 1; font-weight: 600;
+          background: var(--primary-color, #03a9f4);
+          color: var(--text-primary-color, #fff);
+          border-color: transparent;
+        }
+
+        .warn {
+          color: var(--warning-color, #ff9800); font-size: 0.85em;
+          display: flex; align-items: center; gap: 6px; padding-bottom: 8px;
+        }
+        .warn ha-icon { --mdc-icon-size: 16px; }
+
+        section.area { margin-bottom: 4px; }
+        section.area > header {
+          display: flex; align-items: center; gap: 6px;
+          padding: 8px 2px; cursor: pointer; user-select: none;
+        }
+        .caret { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+        .area-name { font-weight: 600; color: var(--primary-text-color); }
+        .armchip {
+          display: inline-flex; align-items: center; gap: 4px;
+          font-size: 0.75em; padding: 2px 8px; border-radius: 10px;
+          background: var(--secondary-background-color, #eee);
+          color: var(--secondary-text-color);
+        }
+        .armchip ha-icon { --mdc-icon-size: 14px; }
+        .arm-armed { color: var(--primary-color, #03a9f4); }
+        .arm-disarmed { color: var(--secondary-text-color); }
+        .arm-pending { color: var(--warning-color, #ff9800); }
+        .arm-triggered { color: var(--error-color, #e53935); font-weight: 700; }
+        .count { margin-left: auto; font-size: 0.8em; color: var(--secondary-text-color); }
+        .open-badge {
+          color: var(--error-color, #e53935); font-weight: 600;
+          background: color-mix(in srgb, var(--error-color, #e53935) 15%, transparent);
+          padding: 1px 8px; border-radius: 10px;
+        }
+        .ok-badge { color: var(--success-color, #43a047); }
+
+        .rows { display: flex; flex-direction: column; }
+        .row {
+          display: flex; align-items: center; gap: 10px;
+          padding: 7px 6px; border-radius: 8px; cursor: pointer;
+        }
+        .row.compact { padding: 3px 6px; }
+        .row:hover { background: var(--secondary-background-color, rgba(128,128,128,0.12)); }
+        .row-open { background: color-mix(in srgb, var(--error-color, #e53935) 8%, transparent); }
+        .row-open:hover { background: color-mix(in srgb, var(--error-color, #e53935) 14%, transparent); }
+
+        .s-ic { --mdc-icon-size: 24px; flex-shrink: 0; }
+        .row.compact .s-ic { --mdc-icon-size: 20px; }
+        .st-open { color: var(--asc-open); }
+        .st-closed { color: var(--asc-closed); }
+        .st-unavail { color: var(--asc-idle); }
+        .st-missing { color: var(--asc-idle); opacity: 0.5; }
+
+        .s-main { flex: 1; min-width: 0; }
+        .s-name {
+          color: var(--primary-text-color);
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .row.compact .s-name { font-size: 0.92em; }
+        .s-sub { display: flex; align-items: center; gap: 6px; }
+        .s-type { font-size: 0.75em; color: var(--secondary-text-color); }
+        .mode-ic { --mdc-icon-size: 14px; color: var(--secondary-text-color); }
+
+        .badge {
+          font-size: 0.68em; padding: 1px 6px; border-radius: 8px;
+          background: var(--secondary-background-color, #eee);
+          color: var(--secondary-text-color); font-weight: 600;
+        }
+        .badge-off { color: var(--warning-color, #ff9800); }
+        .badge-aon { color: var(--accent-color, #ff9800); }
+        .badge-bypass { color: var(--purple-color, #9c27b0); }
+
+        .s-state { font-size: 0.75em; font-weight: 600; white-space: nowrap; }
+      </style>
+    `;
+  }
+}
+
+/* Retry helper (avoids stacking timers per instance) */
+const _scheduleRetry = {
+  set(el, id) { el.__retry = id; },
+  clear(el) { if (el.__retry) { clearTimeout(el.__retry); el.__retry = null; } },
+};
+
+customElements.define('alarmo-sensors-card', AlarmoSensorsCard);
+
+/* ------------------------------------------------------------------ */
+/* GUI editor (minimal, native elements – no external dependencies)    */
+/* ------------------------------------------------------------------ */
+
+class AlarmoSensorsCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = { ...config };
+    if (!this.shadowRoot.childNodes.length) this._render();
+    this._fill();
+  }
+
+  set hass(hass) { this._hass = hass; }
+
+  _dispatch() {
+    const ev = new Event('config-changed', { bubbles: true, composed: true });
+    ev.detail = { config: this._config };
+    this.dispatchEvent(ev);
+  }
+
+  _render() {
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.innerHTML = `
+      <style>
+        .f { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+        label { display: flex; flex-direction: column; font-size: 0.85em; color: var(--secondary-text-color); gap: 4px; }
+        input, select {
+          padding: 8px; border-radius: 6px; border: 1px solid var(--divider-color, #555);
+          background: var(--card-background-color, #222); color: var(--primary-text-color);
+        }
+        .checks { display: flex; flex-wrap: wrap; gap: 10px; }
+        .checks label { flex-direction: row; align-items: center; gap: 6px; }
+      </style>
+      <div class="f">
+        <label>Título <input data-k="title" type="text"></label>
+        <label>Agrupar por
+          <select data-k="group_by">
+            <option value="area">Área</option>
+            <option value="none">Sin agrupar</option>
+          </select>
+        </label>
+        <label>Orden
+          <select data-k="sort">
+            <option value="name">Nombre</option>
+            <option value="open_first">Abiertos primero</option>
+          </select>
+        </label>
+        <div class="checks">
+          <label><input data-k="show_disabled" type="checkbox"> Mostrar sensores desactivados</label>
+          <label><input data-k="compact" type="checkbox"> Compacto</label>
+        </div>
+      </div>
+    `;
+    this.shadowRoot.querySelectorAll('[data-k]').forEach((el) => {
+      el.addEventListener('change', () => {
+        const k = el.getAttribute('data-k');
+        if (el.type === 'checkbox') this._config[k] = el.checked;
+        else this._config[k] = el.value;
+        this._dispatch();
+      });
+    });
+  }
+
+  _fill() {
+    this.shadowRoot.querySelectorAll('[data-k]').forEach((el) => {
+      const k = el.getAttribute('data-k');
+      const v = this._config[k];
+      if (el.type === 'checkbox') el.checked = !!v;
+      else if (v != null) el.value = v;
+    });
+  }
+}
+
+customElements.define('alarmo-sensors-card-editor', AlarmoSensorsCardEditor);
+
+/* Register with Lovelace so the card picker offers it */
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: 'alarmo-sensors-card',
+  name: 'Alarmo Sensors Card',
+  description: 'Muestra el estado de los sensores configurados en Alarmo, agrupados por área y filtrables por modo.',
+  preview: false,
+});
+
+console.info(`%c ALARMO-SENSORS-CARD %c v${CARD_VERSION} `, 'color:white;background:#e53935;font-weight:bold', 'color:white;background:#555');
