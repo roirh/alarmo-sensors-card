@@ -6,26 +6,28 @@
 #   ./deploy.sh watch    # sube automáticamente cada vez que guardas el archivo
 #
 # Configuración (variables de entorno opcionales):
-#   HA_SSH     destino SSH      (defecto: roi@orangepi3)
-#   HA_WWW     ruta www remota  (defecto: /var/lib/homeassistant/homeassistant/www)
+#   HA_SSH      destino SSH            (defecto: roi@orangepi3)
+#   HA_CONTAINER contenedor de HA      (defecto: homeassistant)
+#   HA_WWW      ruta www en el host    (defecto: /var/lib/homeassistant/homeassistant/www)
 #
-# Tras subir: recarga el dashboard (Cmd+Shift+R). Si no ves el cambio,
-# accede por IP LAN (sin Cloudflare) o sube el ?v= del recurso.
+# Método: docker cp al contenedor (tu usuario está en el grupo docker,
+# no se necesitan sudo ni cambiar permisos). Tras subir: Cmd+Shift+R.
+# Si no ves el cambio por https, accede por IP LAN (sin Cloudflare).
 #
-# Requisito único: que tu usuario pueda escribir en www (una sola vez):
-#   ssh -t "$HA_SSH" "sudo chown -R \$(id -un):\$(id -gn) $HA_WWW"
+# Nota: mientras uses /local/, desinstala o desactiva la copia de HACS
+# para que no haya dos definiciones del mismo elemento cargadas.
 
 set -euo pipefail
 
 HOST="${HA_SSH:-roi@orangepi3}"
+CONTAINER="${HA_CONTAINER:-homeassistant}"
 WWW="${HA_WWW:-/var/lib/homeassistant/homeassistant/www}"
 FILE="$(cd "$(dirname "$0")/.." && pwd)/alarmo-sensors-card.js"
-DEST="$HOST:$WWW/local/alarmo-sensors-card.js"
 
 upload() {
-  ssh "${HOST%%:*}" "mkdir -p $WWW/local" 2>/dev/null || true
-  scp -q "$FILE" "$DEST"
-  echo "✓ desplegado $(date '+%H:%M:%S') → $DEST"
+  scp -q "$FILE" "$HOST:/tmp/asc-deploy.js"
+  ssh "$HOST" "docker cp /tmp/asc-deploy.js $CONTAINER:/config/www/alarmo-sensors-card.js && rm -f /tmp/asc-deploy.js"
+  echo "✓ desplegado $(date '+%H:%M:%S') → $CONTAINER:/config/www/"
 }
 
 case "${1:-up}" in

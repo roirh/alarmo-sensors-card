@@ -929,7 +929,12 @@ const _scheduleRetry = {
   clear(el) { if (el.__retry) { clearTimeout(el.__retry); el.__retry = null; } },
 };
 
-customElements.define('alarmo-sensors-card', AlarmoSensorsCard);
+/* Register with Lovelace so the card picker offers it.
+ * Guards: if another copy of this file is loaded (e.g. /local + HACS at once),
+ * the first definition wins and we skip re-defining. */
+if (!customElements.get('alarmo-sensors-card')) {
+  customElements.define('alarmo-sensors-card', AlarmoSensorsCard);
+}
 
 /* ------------------------------------------------------------------ */
 /* GUI editor (minimal, native elements – no external dependencies)    */
@@ -1005,7 +1010,9 @@ class AlarmoSensorsCardEditor extends HTMLElement {
   }
 }
 
-customElements.define('alarmo-sensors-card-editor', AlarmoSensorsCardEditor);
+if (!customElements.get('alarmo-sensors-card-editor')) {
+  customElements.define('alarmo-sensors-card-editor', AlarmoSensorsCardEditor);
+}
 
 /* Register with Lovelace so the card picker offers it */
 window.customCards = window.customCards || [];
