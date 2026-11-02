@@ -171,6 +171,17 @@
           console.log('SINGLESELECT_TEST ' + JSON.stringify(seq) + ' (esperado ["armed_night","armed_home",null,null])');
         }, 700);
       }
+      if (step >= 8) {                                                        // 8: 'Todos' chip deactivation
+        setTimeout(() => {
+          const chip = (m) => card1.shadowRoot.querySelector(`button[data-mode="${m}"]`)?.click();
+          chip('armed_away');
+          const activeAfterMode = [...card1.shadowRoot.querySelectorAll('.chip.chip-active')].map((c) => c.getAttribute('data-mode'));
+          chip('__all__');
+          const activeAfterAll = [...card1.shadowRoot.querySelectorAll('.chip.chip-active')].map((c) => c.getAttribute('data-mode'));
+          console.log('CHIPALL_TEST ' + JSON.stringify({ activeAfterMode, activeAfterAll })
+            + ' (esperado {activeAfterMode:["armed_away"], activeAfterAll:["__all__"]})');
+        }, 700);
+      }
       window.renderCards();
     };
   </script>

@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.1';
+const CARD_VERSION = '0.3.1-rc.2';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -615,7 +615,7 @@ class AlarmoSensorsCard extends HTMLElement {
     }).join('');
 
     const chipAll = `
-      <button class="chip ${!filters || !filters.size ? 'chip-active' : ''}" data-mode="__all__">
+      <button class="chip ${!filters ? 'chip-active' : ''}" data-mode="__all__">
         <ha-icon icon="mdi:filter-variant-remove"></ha-icon>
         <span>${i18n(lang, t.allModes)}</span>
       </button>
