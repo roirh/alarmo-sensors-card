@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.0';
+const CARD_VERSION = '0.3.1';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -152,7 +152,7 @@ class AlarmoSensorsCard extends HTMLElement {
     _scheduleRetry.clear(this);
     this._unsubConfig = null;
     this._collapsedAreas = new Set();
-    this._activeModeFilters = null; // null = show all
+    this._activeModeFilters = null; // single selected mode, or null = show all
     this._expandedSensor = null;
   }
 
@@ -373,13 +373,13 @@ class AlarmoSensorsCard extends HTMLElement {
   }
 
   _filteredSensors() {
-    const filters = this._activeModeFilters;
+    const mode = this._activeModeFilters;
     return this._alarmo.sensors.filter((s) => {
       if (!this._config.show_disabled && !s.enabled) return false;
-      if (filters && filters.size) {
-        // A sensor matches when it is active in at least one of the selected
-        // modes (or is always_on, which applies to every mode).
-        const match = s.always_on || (s.modes || []).some((m) => filters.has(m));
+      if (mode) {
+        // A sensor matches when it is active in the selected mode
+        // (always_on sensors apply to every mode).
+        const match = s.always_on || (s.modes || []).includes(mode);
         if (!match) return false;
       }
       return true;
@@ -603,9 +603,9 @@ class AlarmoSensorsCard extends HTMLElement {
     const allModes = this._allModes();
     const filters = this._activeModeFilters;
 
-    // Filter chips
+    // Filter chips (single-select: only one mode active at a time)
     const chips = allModes.map((m) => {
-      const active = filters && filters.has(m);
+      const active = filters === m;
       return `
         <button class="chip ${active ? 'chip-active' : ''}" data-mode="${m}" title="${i18n(lang, MODES[m].label)}">
           <ha-icon icon="${MODES[m].icon}"></ha-icon>
@@ -763,9 +763,9 @@ class AlarmoSensorsCard extends HTMLElement {
         if (mode === '__all__') {
           this._activeModeFilters = null;
         } else {
-          const set = new Set(this._activeModeFilters || []);
-          if (set.has(mode)) set.delete(mode); else set.add(mode);
-          this._activeModeFilters = set.size ? set : null;
+          // Single-select: activate only this mode; tapping the active one
+          // again returns to "All".
+          this._activeModeFilters = this._activeModeFilters === mode ? null : mode;
         }
         this._render();
       });

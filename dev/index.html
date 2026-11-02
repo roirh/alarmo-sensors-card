@@ -160,6 +160,17 @@
           console.log('MOREINFO_TEST ' + JSON.stringify(log));
         }, 700);
       }
+      if (step >= 7) {                                                        // 7: single-select chips
+        setTimeout(() => {
+          const seq = [];
+          const chip = (m) => card1.shadowRoot.querySelector(`button[data-mode="${m}"]`)?.click();
+          chip('armed_night'); seq.push(card1._activeModeFilters);   // -> night
+          chip('armed_home');  seq.push(card1._activeModeFilters);   // -> home (night deselected)
+          chip('armed_home');  seq.push(card1._activeModeFilters);   // -> null (all)
+          chip('__all__');     seq.push(card1._activeModeFilters);   // -> null
+          console.log('SINGLESELECT_TEST ' + JSON.stringify(seq) + ' (esperado ["armed_night","armed_home",null,null])');
+        }, 700);
+      }
       window.renderCards();
     };
   </script>
