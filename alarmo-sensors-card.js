@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.1-rc.2';
+const CARD_VERSION = '0.3.1-rc.3';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -174,6 +174,7 @@ class AlarmoSensorsCard extends HTMLElement {
       entities: Array.isArray(config.entities) ? config.entities : null,
       include: typeof config.include === 'string' ? config.include : null,
       show_more_info: config.show_more_info !== false,
+      debug: !!config.debug,
     };
     this._alarmo = null;
     this._activeModeFilters = null;
@@ -405,13 +406,38 @@ class AlarmoSensorsCard extends HTMLElement {
     const members = [row.primary, ...row.companions];
     for (const s of members) {
       const reg = h.entities && h.entities[s.entity_id];
+      if (this._config.debug) {
+        console.debug('[alarmo-sensors-card]', s.entity_id,
+          'reg:', reg ? JSON.stringify({ device_id: reg.device_id, area_id: reg.area_id }) : 'NO está en hass.entities');
+      }
       if (reg && reg.area_id && h.areas && h.areas[reg.area_id] && h.areas[reg.area_id].name) {
         return h.areas[reg.area_id].name;
       }
-      if (reg && reg.device_id && h.devices && h.devices[reg.device_id]) {
-        const d = h.devices[reg.device_id];
+      const devId = this._resolveDeviceId(s.entity_id);
+      if (devId && h.devices && h.devices[devId]) {
+        const d = h.devices[devId];
+        if (this._config.debug) {
+          console.debug('[alarmo-sensors-card]', s.entity_id, 'device:', d.name || d.id, 'area_id:', d.area_id || 'SIN ZONA');
+        }
         if (d.area_id && h.areas && h.areas[d.area_id] && h.areas[d.area_id].name) {
           return h.areas[d.area_id].name;
+        }
+      }
+    }
+    return null;
+  }
+
+  _resolveDeviceId(entityId) {
+    const h = this._hass;
+    const reg = h && h.entities && h.entities[entityId];
+    if (reg && reg.device_id) return reg.device_id;
+    // Fallback: algún hermano con la misma raíz de nombre sí que expone
+    // device_id (registries que separan contact/tamper en entidades sueltas).
+    const stem = sensorStem(entityId);
+    if (stem && h && h.entities) {
+      for (const [eid, entry] of Object.entries(h.entities)) {
+        if (entry && entry.device_id && eid !== entityId && eid.includes(stem)) {
+          return entry.device_id;
         }
       }
     }
@@ -464,8 +490,7 @@ class AlarmoSensorsCard extends HTMLElement {
     const byDev = new Map();
     const byStem = new Map();
     sensors.forEach((s) => {
-      const reg = this._hass && this._hass.entities && this._hass.entities[s.entity_id];
-      const dev = reg && reg.device_id;
+      const dev = this._resolveDeviceId(s.entity_id);
       if (dev) {
         if (byDev.has(dev)) union(byDev.get(dev), s); else byDev.set(dev, s);
       }
