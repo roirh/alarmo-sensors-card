@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.2.0';
+const CARD_VERSION = '0.3.0';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -372,11 +372,9 @@ class AlarmoSensorsCard extends HTMLElement {
     return [...set].filter((m) => MODES[m]);
   }
 
-  _visibleSensors(areaId) {
+  _filteredSensors() {
     const filters = this._activeModeFilters;
-    let list = this._alarmo.sensors.filter((s) => {
-      const areaKey = s.area != null ? String(s.area) : (this._alarmo.areas[0] ? this._alarmo.areas[0].area_id : null);
-      if (areaKey !== areaId) return false;
+    return this._alarmo.sensors.filter((s) => {
       if (!this._config.show_disabled && !s.enabled) return false;
       if (filters && filters.size) {
         // A sensor matches when it is active in at least one of the selected
@@ -386,7 +384,53 @@ class AlarmoSensorsCard extends HTMLElement {
       }
       return true;
     });
-    return this._mergeRows(list);
+  }
+
+  _visibleSensors(areaId) {
+    return this._mergeRows(this._filteredSensors().filter((s) => {
+      const areaKey = s.area != null ? String(s.area) : (this._alarmo.areas[0] ? this._alarmo.areas[0].area_id : null);
+      return areaKey === areaId;
+    }));
+  }
+
+  _allRows() {
+    return this._mergeRows(this._filteredSensors());
+  }
+
+  /* HA zone of a row: entity registry area -> device area, primary members
+   * first. Returns null when nothing in the row is assigned to a zone. */
+  _deviceAreaName(row) {
+    const h = this._hass;
+    if (!h) return null;
+    const members = [row.primary, ...row.companions];
+    for (const s of members) {
+      const reg = h.entities && h.entities[s.entity_id];
+      if (reg && reg.area_id && h.areas && h.areas[reg.area_id] && h.areas[reg.area_id].name) {
+        return h.areas[reg.area_id].name;
+      }
+      if (reg && reg.device_id && h.devices && h.devices[reg.device_id]) {
+        const d = h.devices[reg.device_id];
+        if (d.area_id && h.areas && h.areas[d.area_id] && h.areas[d.area_id].name) {
+          return h.areas[d.area_id].name;
+        }
+      }
+    }
+    return null;
+  }
+
+  _armChipForArea(areaId, lang, t) {
+    const alarmEid = this._alarmo.entityByArea[areaId];
+    const alarmState = alarmEid && this._hass && this._hass.states[alarmEid];
+    const armMode = alarmState && alarmState.attributes && alarmState.attributes.arm_mode;
+    const alarmRaw = alarmState ? String(alarmState.state).toLowerCase() : null;
+    if (!alarmRaw) return '';
+    const cls = alarmRaw.includes('triggered') ? 'arm-triggered'
+      : alarmRaw === 'disarmed' ? 'arm-disarmed'
+      : alarmRaw === 'pending' || alarmRaw === 'arming' ? 'arm-pending' : 'arm-armed';
+    const label = alarmRaw.includes('triggered') ? i18n(lang, t.armState.triggered)
+      : alarmRaw === 'disarmed' ? i18n(lang, t.armState.disarmed)
+      : `${i18n(lang, t.armState.armed)}${armMode && MODES[armMode] ? ' · ' + i18n(lang, MODES[armMode].label) : ''}`;
+    return `<span class="armchip ${cls}"><ha-icon icon="${armMode && MODES[armMode] ? MODES[armMode].icon : DISARMED_ICON}"></ha-icon>${label}</span>`;
   }
 
   /* Merge sensors that belong to the same physical device into single rows
@@ -401,18 +445,46 @@ class AlarmoSensorsCard extends HTMLElement {
     if (!this._config.group_by_device) {
       return sensors.map((s) => ({ primary: s, companions: [] }));
     }
-    const groups = new Map();
+    // Union-find: sensors are merged when they share a device_id (entity
+    // registry) OR a name stem (puerta_fondo_contact / puerta_fondo_tamper).
+    // Either signal alone is enough — registries differ between integrations.
+    const parent = new Map(sensors.map((s) => [s.entity_id, s.entity_id]));
+    const find = (x) => {
+      while (parent.get(x) !== x) {
+        parent.set(x, parent.get(parent.get(x)));
+        x = parent.get(x);
+      }
+      return x;
+    };
+    const union = (a, b) => {
+      const ra = find(a.entity_id);
+      const rb = find(b.entity_id);
+      if (ra !== rb) parent.set(ra, rb);
+    };
+    const byDev = new Map();
+    const byStem = new Map();
     sensors.forEach((s) => {
       const reg = this._hass && this._hass.entities && this._hass.entities[s.entity_id];
-      const key = (reg && reg.device_id)
-        ? 'dev:' + reg.device_id
-        : (sensorStem(s.entity_id) ? 'stem:' + sensorStem(s.entity_id) : 'solo:' + s.entity_id);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(s);
+      const dev = reg && reg.device_id;
+      if (dev) {
+        if (byDev.has(dev)) union(byDev.get(dev), s); else byDev.set(dev, s);
+      }
+      const stem = sensorStem(s.entity_id);
+      if (stem) {
+        const key = (s.area || '') + '|' + stem;
+        if (byStem.has(key)) union(byStem.get(key), s); else byStem.set(key, s);
+      }
+    });
+
+    const gmap = new Map();
+    sensors.forEach((s) => {
+      const root = find(s.entity_id);
+      if (!gmap.has(root)) gmap.set(root, []);
+      gmap.get(root).push(s);
     });
 
     const rows = [];
-    groups.forEach((members) => {
+    gmap.forEach((members) => {
       if (members.length < 2) {
         rows.push({ primary: members[0], companions: [] });
         return;
@@ -426,7 +498,7 @@ class AlarmoSensorsCard extends HTMLElement {
         sorted.find((s) => s.type !== 'tamper') ||
         sorted[0];
       const companions = sorted.filter((s) => s !== primary);
-      rows.push({ primary, companions, grouped: true, name: this._deviceName(sorted, primary) });
+      rows.push({ primary, companions, grouped: true, name: this._deviceName(members, primary) });
     });
 
     const rowName = (r) => r.name || r.primary.name;
@@ -501,6 +573,7 @@ class AlarmoSensorsCard extends HTMLElement {
       alwaysOn: { en: '24/7', es: '24/7' },
       bypass: { en: 'Bypassed', es: 'Bypass' },
       tamper: { en: 'Tamper', es: 'Manip.' },
+      noZone: { en: 'No zone', es: 'Sin zona' },
       allModes: { en: 'All', es: 'Todos' },
       noData: { en: 'Waiting for Alarmo data…', es: 'Esperando datos de Alarmo…' },
       wsWarn: {
@@ -525,8 +598,7 @@ class AlarmoSensorsCard extends HTMLElement {
       return;
     }
 
-    const areas = this._visibleAreas();
-    const groupByArea = this._config.group_by !== 'none';
+    const groupBy = this._config.group_by;
     const bypassed = this._bypassedSet();
     const allModes = this._allModes();
     const filters = this._activeModeFilters;
@@ -549,41 +621,48 @@ class AlarmoSensorsCard extends HTMLElement {
       </button>
     `;
 
-    // Area sections
-    const sections = areas.map((area) => {
-      const sensors = this._visibleSensors(area.area_id);
-      if (this._config.group_by !== 'none' && !this._config.show_disabled && !sensors.length && this._alarmo.sensors.length) {
-        // skip empty areas unless it's the only pseudo-area
-        if (areas.length > 1) return '';
-      }
-      const alarmEid = this._alarmo.entityByArea[area.area_id];
-      const alarmState = alarmEid && this._hass && this._hass.states[alarmEid];
-      const armMode = alarmState && alarmState.attributes && alarmState.attributes.arm_mode;
-      const alarmRaw = alarmState ? String(alarmState.state).toLowerCase() : null;
-      let armChip = '';
-      if (alarmRaw) {
-        const cls = alarmRaw.includes('triggered') ? 'arm-triggered'
-          : alarmRaw === 'disarmed' ? 'arm-disarmed'
-          : alarmRaw === 'pending' || alarmRaw === 'arming' ? 'arm-pending' : 'arm-armed';
-        const label = alarmRaw.includes('triggered') ? i18n(lang, t.armState.triggered)
-          : alarmRaw === 'disarmed' ? i18n(lang, t.armState.disarmed)
-          : `${i18n(lang, t.armState.armed)}${armMode && MODES[armMode] ? ' · ' + i18n(lang, MODES[armMode].label) : ''}`;
-        armChip = `<span class="armchip ${cls}"><ha-icon icon="${armMode && MODES[armMode] ? MODES[armMode].icon : DISARMED_ICON}"></ha-icon>${label}</span>`;
-      }
+    // Build section list — either alarmo areas or HA zones (device areas).
+    const sectionsList = [];
+    if (groupBy === 'device_area') {
+      const noZone = i18n(lang, t.noZone);
+      const buckets = new Map();
+      this._allRows().forEach((r) => {
+        const zone = this._deviceAreaName(r) || noZone;
+        if (!buckets.has(zone)) buckets.set(zone, []);
+        buckets.get(zone).push(r);
+      });
+      [...buckets.entries()]
+        .sort((a, b) => ((a[0] === noZone) - (b[0] === noZone)) || a[0].localeCompare(b[0]))
+        .forEach(([zone, rows]) => sectionsList.push({
+          key: 'z:' + zone,
+          title: zone,
+          rows,
+          armChip: this._alarmo.areas.length === 1 ? this._armChipForArea(this._alarmo.areas[0].area_id, lang, t) : '',
+        }));
+    } else if (groupBy === 'area') {
+      const areas = this._visibleAreas();
+      areas.forEach((area) => {
+        const rows = this._visibleSensors(area.area_id);
+        if (!this._config.show_disabled && !rows.length && this._alarmo.sensors.length && areas.length > 1) return;
+        sectionsList.push({ key: area.area_id, title: area.name, rows, armChip: this._armChipForArea(area.area_id, lang, t) });
+      });
+    }
 
-      const collapsed = this._collapsedAreas.has(area.area_id);
-      const rows = sensors.map((s) => this._sensorRow(s, bypassed, lang, t)).join('');
-      const summary = this._summaryBadge(sensors, lang, t);
+    // Area sections
+    const sections = sectionsList.map(({ key, title, rows, armChip }) => {
+      const collapsed = this._collapsedAreas.has(key);
+      const rowHtml = rows.map((s) => this._sensorRow(s, bypassed, lang, t)).join('');
+      const summary = this._summaryBadge(rows, lang, t);
 
       return `
         <section class="area ${collapsed ? 'collapsed' : ''}">
-          <header data-area="${area.area_id}">
+          <header data-area="${key}">
             <ha-icon class="caret" icon="${collapsed ? 'mdi:chevron-right' : 'mdi:chevron-down'}"></ha-icon>
-            <span class="area-name">${area.name}</span>
+            <span class="area-name">${title}</span>
             ${armChip}
             <span class="count">${summary}</span>
           </header>
-          ${collapsed ? '' : `<div class="rows">${rows || `<div class="empty small">${i18n(lang, { en: 'No sensors match the filter', es: 'Ningún sensor coincide con el filtro' })}</div>`}</div>`}
+          ${collapsed ? '' : `<div class="rows">${rowHtml || `<div class="empty small">${i18n(lang, { en: 'No sensors match the filter', es: 'Ningún sensor coincide con el filtro' })}</div>`}</div>`}
         </section>
       `;
     }).join('');
@@ -601,7 +680,7 @@ class AlarmoSensorsCard extends HTMLElement {
         ${title}
         ${allModes.length ? `<div class="chips">${chipAll}${chips}</div>` : ''}
         ${warn}
-        ${groupByArea ? sections : this._flatList(lang, t, bypassed)}
+        ${groupBy !== 'none' ? sections : this._flatList(lang, t, bypassed)}
       </ha-card>
       ${this._styles()}
     `;
@@ -721,8 +800,9 @@ class AlarmoSensorsCard extends HTMLElement {
     if (!entityId) return;
     // Standard Lovelace event: opens Home Assistant's more-info dialog,
     // exactly like clicking the entity anywhere else in the frontend.
-    const ev = new Event('hass-more-info', { bubbles: true, composed: true });
-    ev.entity = entityId;
+    // HA >= 2025.x reads detail.entityId; older versions read .entity — set both.
+    const ev = new CustomEvent('hass-more-info', { bubbles: true, composed: true, detail: { entityId } });
+    Object.defineProperty(ev, 'entity', { value: entityId });
     this.dispatchEvent(ev);
   }
 
@@ -887,7 +967,8 @@ class AlarmoSensorsCardEditor extends HTMLElement {
         <label>Título <input data-k="title" type="text"></label>
         <label>Agrupar por
           <select data-k="group_by">
-            <option value="area">Área</option>
+            <option value="area">Área de Alarmo</option>
+            <option value="device_area">Zona HA del dispositivo</option>
             <option value="none">Sin agrupar</option>
           </select>
         </label>
