@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.1-rc.4';
+const CARD_VERSION = '0.3.1-rc.5';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -763,7 +763,7 @@ class AlarmoSensorsCard extends HTMLElement {
       : i18n(lang, t.missing);
 
     return `
-      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''} ${row.grouped ? 'row-grouped' : ''}" data-entity="${sensor.entity_id}">
+      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''} ${row.grouped ? 'row-grouped' : ''} ${!sensor.enabled ? 'row-disabled' : ''}" data-entity="${sensor.entity_id}">
         <ha-icon class="s-ic ${stateCls}" icon="${open ? icon.open : icon.closed}"></ha-icon>
         <div class="s-main">
           <div class="s-name">${row.name || sensor.name}</div>
@@ -941,6 +941,7 @@ class AlarmoSensorsCard extends HTMLElement {
         }
         .badge-tamper-unavail { opacity: 0.5; }
         .row-grouped .s-name { letter-spacing: 0.01em; }
+        .row-disabled .s-state, .row-disabled .s-ic { opacity: 0.45; }
 
         .s-state { font-size: 0.75em; font-weight: 600; white-space: nowrap; }
       </style>
