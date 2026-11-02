@@ -61,7 +61,9 @@
     <div class="panel">
       <h3>Simular sensores</h3>
       <button onclick="toggleSensor('binary_sensor.puerta_principal')">🚪 Puerta principal (abrir/cerrar)</button>
+      <button onclick="toggleTamper('binary_sensor.puerta_principal_tamper')">🛡️ Tamper puerta principal</button>
       <button onclick="toggleSensor('binary_sensor.ventana_salon')">🪟 Ventana salón</button>
+      <button onclick="toggleTamper('binary_sensor.ventana_salon_tamper')">🛡️ Tamper ventana salón</button>
       <button onclick="toggleSensor('lock.cerradura_entrada')">🔒 Cerradura (locked/unlocked)</button>
       <button onclick="toggleSensor('binary_sensor.movimiento_pasillo')">🏃 Movimiento pasillo</button>
       <button onclick="setState('binary_sensor.sensor_movimiento_garaje','unavailable')">⚠️ Sensor garaje → unavailable</button>
@@ -140,6 +142,24 @@
         toggleSensor('binary_sensor.ventana_salon');
       }
       if (step >= 4) toggleGarageDoorEnabled();                               // 4: config change -> sensor shows up
+      if (step >= 5) {                                                        // 5: device grouping + tamper alert
+        const chipAll = card1.shadowRoot.querySelector('button[data-mode="__all__"]');
+        if (chipAll) chipAll.click();
+        armArea('alarm_control_panel.planta_baja', 'armed_away');
+        toggleTamper('binary_sensor.puerta_principal_tamper');
+        window._moreInfoLog = [];
+        document.addEventListener('hass-more-info', (e) => window._moreInfoLog.push(e.entity));
+      }
+      if (step >= 6) {                                                        // 6: click row & tamper badge
+        setTimeout(() => {
+          const log = [];
+          card1.shadowRoot.querySelector('.row[data-entity="binary_sensor.puerta_principal"]')?.click();
+          log.push(['row', [...window._moreInfoLog]]);
+          card1.shadowRoot.querySelector('.badge[data-tamper="binary_sensor.ventana_salon_tamper"]')?.click();
+          log.push(['tamper', [...window._moreInfoLog]]);
+          console.log('MOREINFO_TEST ' + JSON.stringify(log));
+        }, 700);
+      }
       window.renderCards();
     };
   </script>

@@ -56,6 +56,7 @@ Para actualizaciones, publica una nueva release en GitHub y HACS la detectará.
 type: custom:alarmo-sensors-card
 title: "Alarmo · Estado de sensores"   # opcional
 group_by: area                          # area (defecto) | none
+group_by_device: true                   # defecto: true – fusiona contact+tamper en una fila
 sort: name                              # name (defecto) | open_first
 areas: []                               # opcional: limitar áreas por id o nombre
 modes: []                               # opcional: limitar los chips de filtro
@@ -63,6 +64,19 @@ show_disabled: false                    # mostrar sensores desactivados en alarm
 compact: false                          # filas más densas
 show_more_info: true                    # clic abre el diálogo more-info
 ```
+
+### Agrupación por dispositivo (desde v0.2.0)
+
+Cuando `group_by_device: true` (por defecto), los sensores que pertenecen al mismo dispositivo físico se muestran en **una sola fila**: el estado principal es el del sensor de contacto/apertura, y cada sensor de tamper del grupo aparece como un badge compacto — gris en reposo, **rojo ("Manip.")** cuando detecta manipulación. La agrupación se resuelve en dos niveles, por robustez:
+
+1. **`device_id` del registro de entidades de HA** (`hass.entities`), si está disponible. El nombre de la fila es el del dispositivo (que suele tener asignada una zona de HA).
+2. **Heurística de sufijo**: entidades que comparten raíz de nombre (`puerta_fondo_contact` + `puerta_fondo_tamper`) se agrupan aunque el registro no disponga el `device_id`.
+
+Los sensores sin pareja se muestran igual que siempre, por lo que este ajuste es seguro en cualquier instalación.
+
+### Clic en un sensor
+
+El clic en una fila abre el **diálogo more-info estándar de Home Assistant** (el mismo que al pulsar cualquier entidad en el frontend). El clic en un badge de tamper abre el more-info del sensor tamper concreto. Se puede desactivar con `show_more_info: false`.
 
 ### Modo fallback manual (flexibilidad)
 

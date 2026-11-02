@@ -54,9 +54,23 @@ const MOCK_SENSORS = {
     allow_open: false, trigger_unavailable: false, auto_bypass: false, auto_bypass_modes: [],
     area: '1700000001', enabled: true, entry_delay: null, delay_on: null,
   },
+  'binary_sensor.puerta_principal_tamper': {
+    entity_id: 'binary_sensor.puerta_principal_tamper',
+    type: 'tamper', modes: ['armed_away', 'armed_home'],
+    use_exit_delay: false, use_entry_delay: false, always_on: false, arm_on_close: false,
+    allow_open: false, trigger_unavailable: false, auto_bypass: false, auto_bypass_modes: [],
+    area: '1700000001', enabled: true, entry_delay: null, delay_on: null,
+  },
   'binary_sensor.ventana_salon': {
     entity_id: 'binary_sensor.ventana_salon',
     type: 'window', modes: ['armed_away', 'armed_home', 'armed_night'],
+    use_exit_delay: false, use_entry_delay: false, always_on: false, arm_on_close: false,
+    allow_open: false, trigger_unavailable: false, auto_bypass: false, auto_bypass_modes: [],
+    area: '1700000001', enabled: true, entry_delay: null, delay_on: null,
+  },
+  'binary_sensor.ventana_salon_tamper': {
+    entity_id: 'binary_sensor.ventana_salon_tamper',
+    type: 'tamper', modes: ['armed_away', 'armed_home', 'armed_night'],
     use_exit_delay: false, use_entry_delay: false, always_on: false, arm_on_close: false,
     allow_open: false, trigger_unavailable: false, auto_bypass: false, auto_bypass_modes: [],
     area: '1700000001', enabled: true, entry_delay: null, delay_on: null,
@@ -98,6 +112,30 @@ const MOCK_SENSORS = {
   },
 };
 
+/* HA entity & device registries (as exposed via hass.entities / hass.devices).
+ * Contact+Tamper pairs share device_id -> the card's primary grouping strategy. */
+const MOCK_ENTITIES = {
+  'binary_sensor.puerta_principal': { entity_id: 'binary_sensor.puerta_principal', device_id: 'dev_puerta_principal', area_id: 'cocina' },
+  'binary_sensor.puerta_principal_tamper': { entity_id: 'binary_sensor.puerta_principal_tamper', device_id: 'dev_puerta_principal', area_id: 'cocina' },
+  'binary_sensor.ventana_salon': { entity_id: 'binary_sensor.ventana_salon', device_id: 'dev_ventana_salon', area_id: 'salon' },
+  'binary_sensor.ventana_salon_tamper': { entity_id: 'binary_sensor.ventana_salon_tamper', device_id: 'dev_ventana_salon', area_id: 'salon' },
+  'binary_sensor.movimiento_pasillo': { entity_id: 'binary_sensor.movimiento_pasillo', device_id: 'dev_pir_pasillo', area_id: 'pasillo' },
+  'binary_sensor.sensor_humo_cocina': { entity_id: 'binary_sensor.sensor_humo_cocina', device_id: 'dev_humo_cocina', area_id: 'cocina' },
+  'binary_sensor.sensor_movimiento_garaje': { entity_id: 'binary_sensor.sensor_movimiento_garaje', device_id: 'dev_pir_garaje', area_id: 'garaje' },
+  'binary_sensor.puerta_garaje': { entity_id: 'binary_sensor.puerta_garaje', device_id: 'dev_puerta_garaje', area_id: 'garaje' },
+  'lock.cerradura_entrada': { entity_id: 'lock.cerradura_entrada', device_id: 'dev_cerradura', area_id: 'entrada' },
+};
+
+const MOCK_DEVICES = {
+  dev_puerta_principal: { id: 'dev_puerta_principal', name: 'Puerta principal', area_id: 'entrada' },
+  dev_ventana_salon: { id: 'dev_ventana_salon', name: 'Ventana salón', area_id: 'salon' },
+  dev_pir_pasillo: { id: 'dev_pir_pasillo', name: 'PIR pasillo', area_id: 'pasillo' },
+  dev_humo_cocina: { id: 'dev_humo_cocina', name: 'Detector humo cocina', area_id: 'cocina' },
+  dev_pir_garaje: { id: 'dev_pir_garaje', name: 'PIR garaje', area_id: 'garaje' },
+  dev_puerta_garaje: { id: 'dev_puerta_garaje', name: 'Puerta garaje', area_id: 'garaje' },
+  dev_cerradura: { id: 'dev_cerradura', name: 'Cerradura entrada', area_id: 'entrada' },
+};
+
 const MOCK_ALARM_ENTITIES = [
   { entity_id: 'alarm_control_panel.planta_baja', area_id: '1700000001' },
   { entity_id: 'alarm_control_panel.garaje', area_id: '1700000002' },
@@ -122,7 +160,9 @@ const STATES = {
     },
   },
   'binary_sensor.puerta_principal': { entity_id: 'binary_sensor.puerta_principal', state: 'off', attributes: { friendly_name: 'Puerta principal', device_class: 'door' } },
+  'binary_sensor.puerta_principal_tamper': { entity_id: 'binary_sensor.puerta_principal_tamper', state: 'off', attributes: { friendly_name: 'Puerta principal tamper', device_class: 'tamper' } },
   'binary_sensor.ventana_salon': { entity_id: 'binary_sensor.ventana_salon', state: 'off', attributes: { friendly_name: 'Ventana salón', device_class: 'window' } },
+  'binary_sensor.ventana_salon_tamper': { entity_id: 'binary_sensor.ventana_salon_tamper', state: 'off', attributes: { friendly_name: 'Ventana salón tamper', device_class: 'tamper' } },
   'binary_sensor.movimiento_pasillo': { entity_id: 'binary_sensor.movimiento_pasillo', state: 'off', attributes: { friendly_name: 'Movimiento pasillo', device_class: 'motion' } },
   'binary_sensor.sensor_humo_cocina': { entity_id: 'binary_sensor.sensor_humo_cocina', state: 'off', attributes: { friendly_name: 'Humo cocina', device_class: 'smoke' } },
   'binary_sensor.sensor_movimiento_garaje': { entity_id: 'binary_sensor.sensor_movimiento_garaje', state: 'off', attributes: { friendly_name: 'Movimiento garaje', device_class: 'motion' } },
@@ -135,6 +175,8 @@ class MockHass {
   constructor() {
     this.language = 'es';
     this.states = STATES;
+    this.entities = MOCK_ENTITIES;
+    this.devices = MOCK_DEVICES;
     this.connection = {
       subscribeMessage: async (cb, msg) => {
         MockHass._subs[msg.type] = MockHass._subs[msg.type] || [];
@@ -190,4 +232,9 @@ function toggleGarageDoorEnabled() {
   MOCK_SENSORS['binary_sensor.puerta_garaje'].enabled =
     !MOCK_SENSORS['binary_sensor.puerta_garaje'].enabled;
   window.mockHass.fireConfigUpdated();
+}
+
+/* Simulate a tamper detection (device grouping test) */
+function toggleTamper(entityId) {
+  setState(entityId, STATES[entityId].state === 'on' ? 'off' : 'on');
 }

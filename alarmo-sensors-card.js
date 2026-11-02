@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.1.0';
+const CARD_VERSION = '0.2.0';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -106,6 +106,36 @@ function normalizeSensorType(rawType, stateObj) {
   }
 }
 
+/* Device-grouping helpers ------------------------------------------ */
+
+// Common HA sensor suffixes. Entities sharing a stem (e.g. puerta_fondo_contact
+// + puerta_fondo_tamper) are treated as the same physical device when the
+// entity registry has no device_id for them.
+const STEM_SUFFIXES = [
+  '_contact', '_tamper', '_occupancy', '_motion_detection', '_motion',
+  '_opening', '_vibration', '_sound', '_safety', '_smoke', '_gas',
+  '_moisture', '_heat', '_carbon_monoxide',
+];
+
+function sensorStem(entityId) {
+  const bare = entityId.replace(/^[^.]+\./, '');
+  for (const s of STEM_SUFFIXES) {
+    if (bare.endsWith(s)) return bare.slice(0, -s.length);
+  }
+  return null;
+}
+
+function prettify(stem) {
+  return stem
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .replace(/(^|\s)\S/g, (c) => c.toUpperCase());
+}
+
+// Render order: regular sensors first, tampers last (so a tamper never
+// becomes the primary of a device group).
+const TYPE_RANK = { door: 0, window: 0, motion: 1, environmental: 2, other: 3, tamper: 4 };
+
 /* ------------------------------------------------------------------ */
 /* The card                                                            */
 /* ------------------------------------------------------------------ */
@@ -135,6 +165,7 @@ class AlarmoSensorsCard extends HTMLElement {
     this._config = {
       title: config.title || '',
       group_by: config.group_by || 'area',            // 'area' | 'none'
+      group_by_device: config.group_by_device !== false, // default true
       areas: Array.isArray(config.areas) ? config.areas : null,
       modes: Array.isArray(config.modes) ? config.modes : null,
       show_disabled: !!config.show_disabled,
@@ -342,7 +373,6 @@ class AlarmoSensorsCard extends HTMLElement {
   }
 
   _visibleSensors(areaId) {
-    const lang = this._language();
     const filters = this._activeModeFilters;
     let list = this._alarmo.sensors.filter((s) => {
       const areaKey = s.area != null ? String(s.area) : (this._alarmo.areas[0] ? this._alarmo.areas[0].area_id : null);
@@ -356,17 +386,72 @@ class AlarmoSensorsCard extends HTMLElement {
       }
       return true;
     });
+    return this._mergeRows(list);
+  }
 
-    if (this._config.sort === 'open_first') {
-      list = list.slice().sort((a, b) => {
-        const ao = this._sensorState(a.entity_id) === 'open' ? 0 : 1;
-        const bo = this._sensorState(b.entity_id) === 'open' ? 0 : 1;
-        return ao - bo || a.name.localeCompare(b.name);
-      });
-    } else {
-      list = list.slice().sort((a, b) => a.name.localeCompare(b.name));
+  /* Merge sensors that belong to the same physical device into single rows
+   * (e.g. puerta_fondo_contact + puerta_fondo_tamper -> one row).
+   * Strategy, in order of reliability:
+   *   1. HA entity registry device_id (hass.entities), when available.
+   *   2. Shared name stem (puerta_fondo_contact / puerta_fondo_tamper).
+   * Groups with a single member render as regular rows, so nothing changes
+   * for sensors that have no tamper/companion counterpart.
+   */
+  _mergeRows(sensors) {
+    if (!this._config.group_by_device) {
+      return sensors.map((s) => ({ primary: s, companions: [] }));
     }
-    return list;
+    const groups = new Map();
+    sensors.forEach((s) => {
+      const reg = this._hass && this._hass.entities && this._hass.entities[s.entity_id];
+      const key = (reg && reg.device_id)
+        ? 'dev:' + reg.device_id
+        : (sensorStem(s.entity_id) ? 'stem:' + sensorStem(s.entity_id) : 'solo:' + s.entity_id);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s);
+    });
+
+    const rows = [];
+    groups.forEach((members) => {
+      if (members.length < 2) {
+        rows.push({ primary: members[0], companions: [] });
+        return;
+      }
+      const sorted = members.slice().sort(
+        (a, b) => ((TYPE_RANK[a.type] ?? 3) - (TYPE_RANK[b.type] ?? 3)) || a.name.localeCompare(b.name)
+      );
+      // Prefer an enabled non-tamper sensor as the row's primary.
+      const primary =
+        sorted.find((s) => s.enabled && s.type !== 'tamper') ||
+        sorted.find((s) => s.type !== 'tamper') ||
+        sorted[0];
+      const companions = sorted.filter((s) => s !== primary);
+      rows.push({ primary, companions, grouped: true, name: this._deviceName(sorted, primary) });
+    });
+
+    const rowName = (r) => r.name || r.primary.name;
+    const rowOpen = (r) => (this._sensorState(r.primary.entity_id) === 'open' ? 0 : 1);
+    if (this._config.sort === 'open_first') {
+      rows.sort((a, b) => rowOpen(a) - rowOpen(b) || rowName(a).localeCompare(rowName(b)));
+    } else {
+      rows.sort((a, b) => rowName(a).localeCompare(rowName(b)));
+    }
+    return rows;
+  }
+
+  _deviceName(members, primary) {
+    // Prefer the HA device registry name, fall back to the shared stem.
+    const reg = this._hass && this._hass.entities && this._hass.entities[primary.entity_id];
+    if (reg && reg.device_id && this._hass.devices) {
+      const dev = this._hass.devices[reg.device_id];
+      if (dev && (dev.name_by_user || dev.name)) return dev.name_by_user || dev.name;
+    }
+    const stem = sensorStem(primary.entity_id);
+    return stem ? prettify(stem) : primary.name;
+  }
+
+  _rowTampers(row) {
+    return row.companions.filter((c) => c.type === 'tamper');
   }
 
   _visibleAreas() {
@@ -415,6 +500,7 @@ class AlarmoSensorsCard extends HTMLElement {
       disabled: { en: 'Disabled', es: 'Desactivado' },
       alwaysOn: { en: '24/7', es: '24/7' },
       bypass: { en: 'Bypassed', es: 'Bypass' },
+      tamper: { en: 'Tamper', es: 'Manip.' },
       allModes: { en: 'All', es: 'Todos' },
       noData: { en: 'Waiting for Alarmo data…', es: 'Esperando datos de Alarmo…' },
       wsWarn: {
@@ -524,22 +610,21 @@ class AlarmoSensorsCard extends HTMLElement {
   }
 
   _flatList(lang, t, bypassed) {
-    const rows = this._alarmo.sensors
-      .filter((s) => this._config.show_disabled || s.enabled)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((s) => this._sensorRow(s, bypassed, lang, t))
-      .join('');
-    return `<div class="rows">${rows}</div>`;
+    const rows = this._mergeRows(
+      this._alarmo.sensors.filter((s) => this._config.show_disabled || s.enabled)
+    );
+    return `<div class="rows">${rows.map((r) => this._sensorRow(r, bypassed, lang, t)).join('')}</div>`;
   }
 
-  _summaryBadge(sensors, lang, t) {
-    const open = sensors.filter((s) => this._sensorState(s.entity_id) === 'open').length;
+  _summaryBadge(rows, lang, t) {
+    const open = rows.filter((r) => this._sensorState(r.primary.entity_id) === 'open').length;
     return open
       ? `<span class="open-badge">${open} ${i18n(lang, t.open).toLowerCase()}</span>`
       : `<span class="ok-badge">✓</span>`;
   }
 
-  _sensorRow(sensor, bypassed, lang, t) {
+  _sensorRow(row, bypassed, lang, t) {
+    const sensor = row.primary;
     const st = this._sensorState(sensor.entity_id);
     const open = st === 'open';
     const icon = SENSOR_ICONS[sensor.type] || SENSOR_ICONS.other;
@@ -551,7 +636,19 @@ class AlarmoSensorsCard extends HTMLElement {
     if (bypassed.has(sensor.entity_id)) badges.push(`<span class="badge badge-bypass">${i18n(lang, t.bypass)}</span>`);
     if (sensor.auto_bypass) badges.push(`<span class="badge badge-bypass" title="auto_bypass">auto</span>`);
 
-    const modeIcons = (sensor.modes || []).filter((m) => MODES[m]).map((m) => `
+    // Tamper companions: one compact badge per tamper entity in the device group.
+    const tamperBadges = this._rowTampers(row).map((tp) => {
+      const tst = this._sensorState(tp.entity_id);
+      const active = tst === 'open';
+      const cls = active ? 'badge-tamper-active' : tst === 'unavailable' ? 'badge-tamper-unavail' : 'badge-tamper';
+      return `<span class="badge ${cls}" data-tamper="${tp.entity_id}" title="${i18n(lang, t.tamper)}: ${tp.name}">
+        <ha-icon icon="${active ? 'mdi:shield-alert' : 'mdi:shield-outline'}"></ha-icon>${i18n(lang, t.tamper)}</span>`;
+    }).join('');
+
+    const all = [sensor, ...row.companions];
+    const modeSet = new Set();
+    all.forEach((s) => (s.modes || []).forEach((m) => MODES[m] && modeSet.add(m)));
+    const modeIcons = [...modeSet].map((m) => `
       <ha-icon class="mode-ic" icon="${MODES[m].icon}" title="${i18n(lang, MODES[m].label)}"></ha-icon>
     `).join('');
 
@@ -562,14 +659,15 @@ class AlarmoSensorsCard extends HTMLElement {
       : i18n(lang, t.missing);
 
     return `
-      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''}" data-entity="${sensor.entity_id}">
+      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''} ${row.grouped ? 'row-grouped' : ''}" data-entity="${sensor.entity_id}">
         <ha-icon class="s-ic ${stateCls}" icon="${open ? icon.open : icon.closed}"></ha-icon>
         <div class="s-main">
-          <div class="s-name">${sensor.name}</div>
+          <div class="s-name">${row.name || sensor.name}</div>
           <div class="s-sub">
             <span class="s-type">${typeLabel}</span>
             ${modeIcons}
             ${badges.join('')}
+            ${tamperBadges}
           </div>
         </div>
         <span class="s-state ${stateCls}">${stateLabel}</span>
@@ -606,12 +704,26 @@ class AlarmoSensorsCard extends HTMLElement {
     if (this._config.show_more_info) {
       root.querySelectorAll('.row').forEach((el) => {
         el.addEventListener('click', () => {
-          const ev = new Event('hass-more-info', { bubbles: true, composed: true });
-          ev.entity = el.getAttribute('data-entity');
-          this.dispatchEvent(ev);
+          this._openMoreInfo(el.getAttribute('data-entity'));
+        });
+      });
+      // A tamper badge opens the dialog of the tamper entity itself.
+      root.querySelectorAll('.badge[data-tamper]').forEach((el) => {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._openMoreInfo(el.getAttribute('data-tamper'));
         });
       });
     }
+  }
+
+  _openMoreInfo(entityId) {
+    if (!entityId) return;
+    // Standard Lovelace event: opens Home Assistant's more-info dialog,
+    // exactly like clicking the entity anywhere else in the frontend.
+    const ev = new Event('hass-more-info', { bubbles: true, composed: true });
+    ev.entity = entityId;
+    this.dispatchEvent(ev);
   }
 
   _styles() {
@@ -716,6 +828,15 @@ class AlarmoSensorsCard extends HTMLElement {
         .badge-aon { color: var(--accent-color, #ff9800); }
         .badge-bypass { color: var(--purple-color, #9c27b0); }
 
+        .badge-tamper { color: var(--secondary-text-color); }
+        .badge-tamper ha-icon, .badge-tamper-active ha-icon { --mdc-icon-size: 12px; vertical-align: -2px; }
+        .badge-tamper-active {
+          color: #fff;
+          background: var(--asc-open);
+        }
+        .badge-tamper-unavail { opacity: 0.5; }
+        .row-grouped .s-name { letter-spacing: 0.01em; }
+
         .s-state { font-size: 0.75em; font-weight: 600; white-space: nowrap; }
       </style>
     `;
@@ -777,6 +898,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
           </select>
         </label>
         <div class="checks">
+          <label><input data-k="group_by_device" type="checkbox"> Agrupar por dispositivo (contact + tamper)</label>
           <label><input data-k="show_disabled" type="checkbox"> Mostrar sensores desactivados</label>
           <label><input data-k="compact" type="checkbox"> Compacto</label>
         </div>
