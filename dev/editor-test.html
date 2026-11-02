@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+  <alarmo-sensors-card-editor id="ed"></alarmo-sensors-card-editor>
+  <script src="../alarmo-sensors-card.js"></script>
+  <script>
+    window._lastCfg = null;
+    document.getElementById('ed').addEventListener('config-changed', (ev) => {
+      window._lastCfg = ev.detail.config;
+    });
+    window.addEventListener('DOMContentLoaded', () => {
+      const ed = document.getElementById('ed');
+      // Primera llamada a setConfig — aquí fallaba (shadowRoot null)
+      ed.setConfig({ type: 'custom:alarmo-sensors-card', title: 'Mi tarjeta', group_by: 'area' });
+      ed.setConfig({ type: 'custom:alarmo-sensors-card', title: 'Mi tarjeta', group_by: 'area' }); // re-uso
+      setTimeout(() => {
+        const title = ed.shadowRoot.querySelector('input[data-k="title"]');
+        const groupBy = ed.shadowRoot.querySelector('select[data-k="group_by"]');
+        console.log('EDITOR_TEST rendered=' + !!title + ' title=' + JSON.stringify(title && title.value)
+          + ' group_by=' + JSON.stringify(groupBy && groupBy.value));
+        groupBy.value = 'device_area';
+        groupBy.dispatchEvent(new Event('change'));
+        console.log('EDITOR_CFG ' + JSON.stringify(window._lastCfg));
+        console.log('EDITOR_TEST_DONE');
+      }, 300);
+    });
+  </script>
+</body></html>

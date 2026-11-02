@@ -84,6 +84,7 @@
     document.getElementById('card1').setConfig({
       type: 'custom:alarmo-sensors-card',
       title: 'Alarmo · Estado de sensores',
+      show_disabled: true,
     });
 
     // Card 2: compact + open first
@@ -158,6 +159,28 @@
           card1.shadowRoot.querySelector('.badge[data-tamper="binary_sensor.ventana_salon_tamper"]')?.click();
           log.push(['tamper', [...window._moreInfoLog]]);
           console.log('MOREINFO_TEST ' + JSON.stringify(log));
+        }, 700);
+      }
+      if (step >= 7) {                                                        // 7: single-select chips
+        setTimeout(() => {
+          const seq = [];
+          const chip = (m) => card1.shadowRoot.querySelector(`button[data-mode="${m}"]`)?.click();
+          chip('armed_night'); seq.push(card1._activeModeFilters);   // -> night
+          chip('armed_home');  seq.push(card1._activeModeFilters);   // -> home (night deselected)
+          chip('armed_home');  seq.push(card1._activeModeFilters);   // -> null (all)
+          chip('__all__');     seq.push(card1._activeModeFilters);   // -> null
+          console.log('SINGLESELECT_TEST ' + JSON.stringify(seq) + ' (esperado ["armed_night","armed_home",null,null])');
+        }, 700);
+      }
+      if (step >= 8) {                                                        // 8: 'Todos' chip deactivation
+        setTimeout(() => {
+          const chip = (m) => card1.shadowRoot.querySelector(`button[data-mode="${m}"]`)?.click();
+          chip('armed_away');
+          const activeAfterMode = [...card1.shadowRoot.querySelectorAll('.chip.chip-active')].map((c) => c.getAttribute('data-mode'));
+          chip('__all__');
+          const activeAfterAll = [...card1.shadowRoot.querySelectorAll('.chip.chip-active')].map((c) => c.getAttribute('data-mode'));
+          console.log('CHIPALL_TEST ' + JSON.stringify({ activeAfterMode, activeAfterAll })
+            + ' (esperado {activeAfterMode:["armed_away"], activeAfterAll:["__all__"]})');
         }, 700);
       }
       window.renderCards();

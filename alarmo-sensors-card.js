@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.0';
+const CARD_VERSION = '0.3.1';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -152,7 +152,7 @@ class AlarmoSensorsCard extends HTMLElement {
     _scheduleRetry.clear(this);
     this._unsubConfig = null;
     this._collapsedAreas = new Set();
-    this._activeModeFilters = null; // null = show all
+    this._activeModeFilters = null; // single selected mode, or null = show all
     this._expandedSensor = null;
   }
 
@@ -174,6 +174,7 @@ class AlarmoSensorsCard extends HTMLElement {
       entities: Array.isArray(config.entities) ? config.entities : null,
       include: typeof config.include === 'string' ? config.include : null,
       show_more_info: config.show_more_info !== false,
+      debug: !!config.debug,
     };
     this._alarmo = null;
     this._activeModeFilters = null;
@@ -373,13 +374,13 @@ class AlarmoSensorsCard extends HTMLElement {
   }
 
   _filteredSensors() {
-    const filters = this._activeModeFilters;
+    const mode = this._activeModeFilters;
     return this._alarmo.sensors.filter((s) => {
       if (!this._config.show_disabled && !s.enabled) return false;
-      if (filters && filters.size) {
-        // A sensor matches when it is active in at least one of the selected
-        // modes (or is always_on, which applies to every mode).
-        const match = s.always_on || (s.modes || []).some((m) => filters.has(m));
+      if (mode) {
+        // A sensor matches when it is active in the selected mode
+        // (always_on sensors apply to every mode).
+        const match = s.always_on || (s.modes || []).includes(mode);
         if (!match) return false;
       }
       return true;
@@ -398,20 +399,56 @@ class AlarmoSensorsCard extends HTMLElement {
   }
 
   /* HA zone of a row: entity registry area -> device area, primary members
-   * first. Returns null when nothing in the row is assigned to a zone. */
-  _deviceAreaName(row) {
+   * first. Returns the area registry entry (or null). */
+  _rowAreaEntry(row) {
     const h = this._hass;
     if (!h) return null;
     const members = [row.primary, ...row.companions];
     for (const s of members) {
       const reg = h.entities && h.entities[s.entity_id];
-      if (reg && reg.area_id && h.areas && h.areas[reg.area_id] && h.areas[reg.area_id].name) {
-        return h.areas[reg.area_id].name;
+      if (this._config.debug) {
+        console.debug('[alarmo-sensors-card]', s.entity_id,
+          'reg:', reg ? JSON.stringify({ device_id: reg.device_id, area_id: reg.area_id }) : 'NO está en hass.entities');
       }
-      if (reg && reg.device_id && h.devices && h.devices[reg.device_id]) {
-        const d = h.devices[reg.device_id];
-        if (d.area_id && h.areas && h.areas[d.area_id] && h.areas[d.area_id].name) {
-          return h.areas[d.area_id].name;
+      let areaId = reg && reg.area_id;
+      if (!areaId) {
+        const devId = this._resolveDeviceId(s.entity_id);
+        const d = devId && h.devices && h.devices[devId];
+        if (this._config.debug && d) {
+          console.debug('[alarmo-sensors-card]', s.entity_id, 'device:', d.name || d.id, 'area_id:', d.area_id || 'SIN ZONA');
+        }
+        areaId = d && d.area_id;
+      }
+      if (areaId && h.areas && h.areas[areaId]) return h.areas[areaId];
+    }
+    return null;
+  }
+
+  _deviceAreaName(row) {
+    const a = this._rowAreaEntry(row);
+    return a && a.name ? a.name : null;
+  }
+
+  /* HA floor of a row: area's floor_id resolved via hass.floors. */
+  _rowFloor(row) {
+    const h = this._hass;
+    const area = this._rowAreaEntry(row);
+    if (!area || !area.floor_id) return null;
+    if (h.floors && h.floors[area.floor_id]) return h.floors[area.floor_id];
+    return { floor_id: area.floor_id, name: null, level: null };
+  }
+
+  _resolveDeviceId(entityId) {
+    const h = this._hass;
+    const reg = h && h.entities && h.entities[entityId];
+    if (reg && reg.device_id) return reg.device_id;
+    // Fallback: algún hermano con la misma raíz de nombre sí que expone
+    // device_id (registries que separan contact/tamper en entidades sueltas).
+    const stem = sensorStem(entityId);
+    if (stem && h && h.entities) {
+      for (const [eid, entry] of Object.entries(h.entities)) {
+        if (entry && entry.device_id && eid !== entityId && eid.includes(stem)) {
+          return entry.device_id;
         }
       }
     }
@@ -464,8 +501,7 @@ class AlarmoSensorsCard extends HTMLElement {
     const byDev = new Map();
     const byStem = new Map();
     sensors.forEach((s) => {
-      const reg = this._hass && this._hass.entities && this._hass.entities[s.entity_id];
-      const dev = reg && reg.device_id;
+      const dev = this._resolveDeviceId(s.entity_id);
       if (dev) {
         if (byDev.has(dev)) union(byDev.get(dev), s); else byDev.set(dev, s);
       }
@@ -574,6 +610,7 @@ class AlarmoSensorsCard extends HTMLElement {
       bypass: { en: 'Bypassed', es: 'Bypass' },
       tamper: { en: 'Tamper', es: 'Manip.' },
       noZone: { en: 'No zone', es: 'Sin zona' },
+      noFloor: { en: 'No floor', es: 'Sin planta' },
       allModes: { en: 'All', es: 'Todos' },
       noData: { en: 'Waiting for Alarmo data…', es: 'Esperando datos de Alarmo…' },
       wsWarn: {
@@ -603,9 +640,9 @@ class AlarmoSensorsCard extends HTMLElement {
     const allModes = this._allModes();
     const filters = this._activeModeFilters;
 
-    // Filter chips
+    // Filter chips (single-select: only one mode active at a time)
     const chips = allModes.map((m) => {
-      const active = filters && filters.has(m);
+      const active = filters === m;
       return `
         <button class="chip ${active ? 'chip-active' : ''}" data-mode="${m}" title="${i18n(lang, MODES[m].label)}">
           <ha-icon icon="${MODES[m].icon}"></ha-icon>
@@ -615,7 +652,7 @@ class AlarmoSensorsCard extends HTMLElement {
     }).join('');
 
     const chipAll = `
-      <button class="chip ${!filters || !filters.size ? 'chip-active' : ''}" data-mode="__all__">
+      <button class="chip ${!filters ? 'chip-active' : ''}" data-mode="__all__">
         <ha-icon icon="mdi:filter-variant-remove"></ha-icon>
         <span>${i18n(lang, t.allModes)}</span>
       </button>
@@ -637,6 +674,29 @@ class AlarmoSensorsCard extends HTMLElement {
           key: 'z:' + zone,
           title: zone,
           rows,
+          armChip: this._alarmo.areas.length === 1 ? this._armChipForArea(this._alarmo.areas[0].area_id, lang, t) : '',
+        }));
+    } else if (groupBy === 'floor') {
+      const noFloor = i18n(lang, t.noFloor);
+      const h = this._hass;
+      const buckets = new Map();
+      this._allRows().forEach((r) => {
+        const floor = this._rowFloor(r);
+        const title = (floor && floor.name) || noFloor;
+        if (!buckets.has(title)) buckets.set(title, { title, floorId: floor && floor.floor_id, level: floor && floor.level, rows: [] });
+        buckets.get(title).rows.push(r);
+      });
+      [...buckets.values()]
+        .sort((a, b) => {
+          const la = a.level == null ? Number.MAX_SAFE_INTEGER : a.level;
+          const lb = b.level == null ? Number.MAX_SAFE_INTEGER : b.level;
+          return la - lb || a.title.localeCompare(b.title);
+        })
+        .sort((a, b) => (a.title === noFloor) - (b.title === noFloor)) // "Sin planta" al final
+        .forEach((b) => sectionsList.push({
+          key: 'f:' + (b.floorId || b.title),
+          title: b.title,
+          rows: b.rows,
           armChip: this._alarmo.areas.length === 1 ? this._armChipForArea(this._alarmo.areas[0].area_id, lang, t) : '',
         }));
     } else if (groupBy === 'area') {
@@ -738,7 +798,7 @@ class AlarmoSensorsCard extends HTMLElement {
       : i18n(lang, t.missing);
 
     return `
-      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''} ${row.grouped ? 'row-grouped' : ''}" data-entity="${sensor.entity_id}">
+      <div class="row ${this._config.compact ? 'compact' : ''} ${st === 'open' ? 'row-open' : ''} ${row.grouped ? 'row-grouped' : ''} ${!sensor.enabled ? 'row-disabled' : ''}" data-entity="${sensor.entity_id}">
         <ha-icon class="s-ic ${stateCls}" icon="${open ? icon.open : icon.closed}"></ha-icon>
         <div class="s-main">
           <div class="s-name">${row.name || sensor.name}</div>
@@ -763,9 +823,9 @@ class AlarmoSensorsCard extends HTMLElement {
         if (mode === '__all__') {
           this._activeModeFilters = null;
         } else {
-          const set = new Set(this._activeModeFilters || []);
-          if (set.has(mode)) set.delete(mode); else set.add(mode);
-          this._activeModeFilters = set.size ? set : null;
+          // Single-select: activate only this mode; tapping the active one
+          // again returns to "All".
+          this._activeModeFilters = this._activeModeFilters === mode ? null : mode;
         }
         this._render();
       });
@@ -916,6 +976,7 @@ class AlarmoSensorsCard extends HTMLElement {
         }
         .badge-tamper-unavail { opacity: 0.5; }
         .row-grouped .s-name { letter-spacing: 0.01em; }
+        .row-disabled .s-state, .row-disabled .s-ic { opacity: 0.45; }
 
         .s-state { font-size: 0.75em; font-weight: 600; white-space: nowrap; }
       </style>
@@ -929,13 +990,23 @@ const _scheduleRetry = {
   clear(el) { if (el.__retry) { clearTimeout(el.__retry); el.__retry = null; } },
 };
 
-customElements.define('alarmo-sensors-card', AlarmoSensorsCard);
+/* Register with Lovelace so the card picker offers it.
+ * Guards: if another copy of this file is loaded (e.g. /local + HACS at once),
+ * the first definition wins and we skip re-defining. */
+if (!customElements.get('alarmo-sensors-card')) {
+  customElements.define('alarmo-sensors-card', AlarmoSensorsCard);
+}
 
 /* ------------------------------------------------------------------ */
 /* GUI editor (minimal, native elements – no external dependencies)    */
 /* ------------------------------------------------------------------ */
 
 class AlarmoSensorsCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+  }
+
   setConfig(config) {
     this._config = { ...config };
     if (!this.shadowRoot.childNodes.length) this._render();
@@ -951,7 +1022,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
   }
 
   _render() {
-    this.attachShadow({ mode: 'open' });
+    // el shadow root ya existe (creado en el constructor)
     this.shadowRoot.innerHTML = `
       <style>
         .f { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
@@ -969,6 +1040,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
           <select data-k="group_by">
             <option value="area">Área de Alarmo</option>
             <option value="device_area">Zona HA del dispositivo</option>
+            <option value="floor">Planta HA</option>
             <option value="none">Sin agrupar</option>
           </select>
         </label>
@@ -982,6 +1054,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
           <label><input data-k="group_by_device" type="checkbox"> Agrupar por dispositivo (contact + tamper)</label>
           <label><input data-k="show_disabled" type="checkbox"> Mostrar sensores desactivados</label>
           <label><input data-k="compact" type="checkbox"> Compacto</label>
+          <label><input data-k="debug" type="checkbox"> Debug (consola)</label>
         </div>
       </div>
     `;
@@ -1005,7 +1078,9 @@ class AlarmoSensorsCardEditor extends HTMLElement {
   }
 }
 
-customElements.define('alarmo-sensors-card-editor', AlarmoSensorsCardEditor);
+if (!customElements.get('alarmo-sensors-card-editor')) {
+  customElements.define('alarmo-sensors-card-editor', AlarmoSensorsCardEditor);
+}
 
 /* Register with Lovelace so the card picker offers it */
 window.customCards = window.customCards || [];
