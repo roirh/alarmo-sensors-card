@@ -55,7 +55,7 @@ Para actualizaciones, publica una nueva release en GitHub y HACS la detectará.
 ```yaml
 type: custom:alarmo-sensors-card
 title: "Alarmo · Estado de sensores"   # opcional
-group_by: area                          # area (defecto) | device_area | none
+group_by: area                          # area (defecto) | device_area | floor | none
 group_by_device: true                   # defecto: true – fusiona contact+tamper en una fila
 sort: name                              # name (defecto) | open_first
 areas: []                               # opcional: limitar áreas por id o nombre
@@ -63,7 +63,12 @@ modes: []                               # opcional: limitar los chips de filtro
 show_disabled: false                    # mostrar sensores desactivados en alarmo
 compact: false                          # filas más densas
 show_more_info: true                    # clic abre el diálogo more-info
+debug: false                            # loguea la resolución entidad->dispositivo->zona en consola
 ```
+
+### Agrupación por plantas HA (desde v0.3.1-rc.6)
+
+`group_by: floor` agrupa por la **planta** asignada a la zona del dispositivo (`area_id` → `floor_id` → `hass.floors`). Las secciones se ordenan por el **nivel** de la planta y los dispositivos sin zona o sin planta caen en el grupo "Sin planta" (último). Con una única área de Alarmo, su chip de estado se replica en cada planta.
 
 ### Agrupación por zonas HA (desde v0.3.0)
 

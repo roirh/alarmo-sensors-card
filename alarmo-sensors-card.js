@@ -13,7 +13,7 @@
  *   /local/alarmo-sensors-card.js — then use `type: custom:alarmo-sensors-card`.
  */
 
-const CARD_VERSION = '0.3.1-rc.5';
+const CARD_VERSION = '0.3.1-rc.6';
 
 /* ------------------------------------------------------------------ */
 /* Static metadata (mirrors alarmo's own frontend const.ts / const.py) */
@@ -399,8 +399,8 @@ class AlarmoSensorsCard extends HTMLElement {
   }
 
   /* HA zone of a row: entity registry area -> device area, primary members
-   * first. Returns null when nothing in the row is assigned to a zone. */
-  _deviceAreaName(row) {
+   * first. Returns the area registry entry (or null). */
+  _rowAreaEntry(row) {
     const h = this._hass;
     if (!h) return null;
     const members = [row.primary, ...row.companions];
@@ -410,21 +410,32 @@ class AlarmoSensorsCard extends HTMLElement {
         console.debug('[alarmo-sensors-card]', s.entity_id,
           'reg:', reg ? JSON.stringify({ device_id: reg.device_id, area_id: reg.area_id }) : 'NO está en hass.entities');
       }
-      if (reg && reg.area_id && h.areas && h.areas[reg.area_id] && h.areas[reg.area_id].name) {
-        return h.areas[reg.area_id].name;
-      }
-      const devId = this._resolveDeviceId(s.entity_id);
-      if (devId && h.devices && h.devices[devId]) {
-        const d = h.devices[devId];
-        if (this._config.debug) {
+      let areaId = reg && reg.area_id;
+      if (!areaId) {
+        const devId = this._resolveDeviceId(s.entity_id);
+        const d = devId && h.devices && h.devices[devId];
+        if (this._config.debug && d) {
           console.debug('[alarmo-sensors-card]', s.entity_id, 'device:', d.name || d.id, 'area_id:', d.area_id || 'SIN ZONA');
         }
-        if (d.area_id && h.areas && h.areas[d.area_id] && h.areas[d.area_id].name) {
-          return h.areas[d.area_id].name;
-        }
+        areaId = d && d.area_id;
       }
+      if (areaId && h.areas && h.areas[areaId]) return h.areas[areaId];
     }
     return null;
+  }
+
+  _deviceAreaName(row) {
+    const a = this._rowAreaEntry(row);
+    return a && a.name ? a.name : null;
+  }
+
+  /* HA floor of a row: area's floor_id resolved via hass.floors. */
+  _rowFloor(row) {
+    const h = this._hass;
+    const area = this._rowAreaEntry(row);
+    if (!area || !area.floor_id) return null;
+    if (h.floors && h.floors[area.floor_id]) return h.floors[area.floor_id];
+    return { floor_id: area.floor_id, name: null, level: null };
   }
 
   _resolveDeviceId(entityId) {
@@ -599,6 +610,7 @@ class AlarmoSensorsCard extends HTMLElement {
       bypass: { en: 'Bypassed', es: 'Bypass' },
       tamper: { en: 'Tamper', es: 'Manip.' },
       noZone: { en: 'No zone', es: 'Sin zona' },
+      noFloor: { en: 'No floor', es: 'Sin planta' },
       allModes: { en: 'All', es: 'Todos' },
       noData: { en: 'Waiting for Alarmo data…', es: 'Esperando datos de Alarmo…' },
       wsWarn: {
@@ -662,6 +674,29 @@ class AlarmoSensorsCard extends HTMLElement {
           key: 'z:' + zone,
           title: zone,
           rows,
+          armChip: this._alarmo.areas.length === 1 ? this._armChipForArea(this._alarmo.areas[0].area_id, lang, t) : '',
+        }));
+    } else if (groupBy === 'floor') {
+      const noFloor = i18n(lang, t.noFloor);
+      const h = this._hass;
+      const buckets = new Map();
+      this._allRows().forEach((r) => {
+        const floor = this._rowFloor(r);
+        const title = (floor && floor.name) || noFloor;
+        if (!buckets.has(title)) buckets.set(title, { title, floorId: floor && floor.floor_id, level: floor && floor.level, rows: [] });
+        buckets.get(title).rows.push(r);
+      });
+      [...buckets.values()]
+        .sort((a, b) => {
+          const la = a.level == null ? Number.MAX_SAFE_INTEGER : a.level;
+          const lb = b.level == null ? Number.MAX_SAFE_INTEGER : b.level;
+          return la - lb || a.title.localeCompare(b.title);
+        })
+        .sort((a, b) => (a.title === noFloor) - (b.title === noFloor)) // "Sin planta" al final
+        .forEach((b) => sectionsList.push({
+          key: 'f:' + (b.floorId || b.title),
+          title: b.title,
+          rows: b.rows,
           armChip: this._alarmo.areas.length === 1 ? this._armChipForArea(this._alarmo.areas[0].area_id, lang, t) : '',
         }));
     } else if (groupBy === 'area') {
@@ -1005,6 +1040,7 @@ class AlarmoSensorsCardEditor extends HTMLElement {
           <select data-k="group_by">
             <option value="area">Área de Alarmo</option>
             <option value="device_area">Zona HA del dispositivo</option>
+            <option value="floor">Planta HA</option>
             <option value="none">Sin agrupar</option>
           </select>
         </label>
